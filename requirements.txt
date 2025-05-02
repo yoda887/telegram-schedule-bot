@@ -1,0 +1,5 @@
+fastapi
+aiogram
+uvicorn
+gspread
+oauth2client
