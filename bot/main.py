@@ -1,6 +1,6 @@
 import asyncio
 from fastapi import FastAPI
-from bot import dp, bot
+from .bot import dp, bot
 
 app = FastAPI()
 
