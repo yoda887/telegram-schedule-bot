@@ -174,3 +174,5 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 creds.json
+schedulebot-458611-13e63a678457.json
+
