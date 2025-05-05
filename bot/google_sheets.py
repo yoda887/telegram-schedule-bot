@@ -3,8 +3,10 @@
 import gspread
 # oauth2client застаріла, але залишаємо поки що, якщо ваш gspread < 5.0
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
-import os # Потрібен для перевірки шляху
+from datetime import datetime, date, timedelta
+import os
+import sys  # Для логування в stderr
+import os  # Потрібен для перевірки шляху
 
 # --- Налаштування ---
 # !!! ЗАМІНІТЬ 'telegram-schedule-bot' НА ВАШУ РЕАЛЬНУ НАЗВУ ПАПКИ !!!
@@ -13,17 +15,25 @@ SERVICE_ACCOUNT_FILE = 'creds.json'
 # Переконайтесь, що назви таблиці та аркушів ТОЧНО відповідають вашим у Google Sheets
 SPREADSHEET_NAME = "ClientRequests"
 SCHEDULE_WORKSHEET_NAME = "Графік"
-REQUESTS_WORKSHEET_NAME = "Заявки" # Потрібно для збереження запитів
+REQUESTS_WORKSHEET_NAME = "Заявки"  # Потрібно для збереження запитів
 
 # Очікувані назви стовпців в аркуші "Графік" (регістр важливий!)
 DATE_COLUMN = 'Дата'
 TIME_COLUMN = 'Час'
 STATUS_COLUMN = 'Статус'
-STATUS_FREE = 'вільно' # Статус вільного часу (у нижньому регістрі для порівняння)
-STATUS_BOOKED = 'Заброньовано' # Статус для оновлення
+STATUS_FREE = 'вільно'  # Статус вільного часу (у нижньому регістрі для порівняння)
+STATUS_BOOKED = 'Заброньовано'  # Статус для оновлення
+
+# !!! ВАЖЛИВО: Вкажіть ТОЧНИЙ формат дати, який використовується у вашому стовпці 'Дата' в Google Sheets !!!
+# Приклади: "%d.%m.%Y" для "05.05.2025", "%Y-%m-%d" для "2025-05-05"
+DATE_FORMAT_IN_SHEET = "%d.%m.%Y"
 
 # Області доступу API
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+
+# --- Авторизація ---
+_CLIENT = None  # Кешуємо клієнт для ефективності
+
 
 # --- Авторизація ---
 def get_gspread_client():
@@ -37,21 +47,24 @@ def get_gspread_client():
 
         creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, SCOPE)
         client = gspread.authorize(creds)
-        print("Авторизація в Google Sheets успішна.") # Лог успіху
+        print("Авторизація в Google Sheets успішна.")  # Лог успіху
         return client
     except FileNotFoundError as e:
         print(f"ПОМИЛКА АВТОРИЗАЦІЇ (Файл не знайдено): {e}")
-        raise # Перекидаємо помилку далі
+        raise  # Перекидаємо помилку далі
     except Exception as e:
         # Логуємо будь-яку іншу помилку авторизації
         print(f"ПОМИЛКА АВТОРИЗАЦІЇ Google Sheets: {type(e).__name__} - {e}")
-        raise # Перекидаємо помилку далі, щоб її спіймав бот
+        raise  # Перекидаємо помилку далі, щоб її спіймав бот
+
 
 # --- Отримання доступних слотів ---
 def get_available_dates():
     """Отримує доступні дати та час з аркуша 'Графік'."""
+    """фільтруючи за статусом 'вільно' та за датою (наступні 7 днів)."""
     print(f"Спроба отримати доступні дати з аркуша '{SCHEDULE_WORKSHEET_NAME}'...")
     available_dates = {}
+    available_slots = {}
     try:
         client = get_gspread_client()
         sheet = client.open(SPREADSHEET_NAME).worksheet(SCHEDULE_WORKSHEET_NAME)
@@ -59,6 +72,11 @@ def get_available_dates():
         # Використовуємо get_all_records(), припускаючи, що перший рядок - заголовки
         records = sheet.get_all_records()
         print(f"Отримано {len(records)} записів.")
+
+        today = date.today()
+        end_date = today + timedelta(days=7)  # Сьогодні + 6 наступних днів
+
+        processed_dates = {}  # Словник для групування часу за датами
 
         for record in records:
             # Безпечно отримуємо значення, перевіряючи наявність ключів
@@ -68,12 +86,38 @@ def get_available_dates():
 
             # Перевіряємо, чи всі потрібні дані є, і чи статус 'вільно'
             if date_val and time_val and status_val and str(status_val).strip().lower() == STATUS_FREE:
-                if date_val not in available_dates:
-                    available_dates[date_val] = []
-                available_dates[date_val].append(time_val)
 
-        print(f"Знайдено доступні слоти: {available_dates}")
-        return available_dates
+                try:
+                    # Парсимо дату з рядка згідно з вказаним форматом
+                    record_date = datetime.strptime(str(date_val), DATE_FORMAT_IN_SHEET).date()
+
+                    # Перевіряємо, чи дата входить у потрібний діапазон (сьогодні + 6 днів)
+                    if today <= record_date < end_date:
+                        # Використовуємо рядок дати як ключ, щоб зберегти оригінальний формат
+                        if date_val not in processed_dates:
+                            processed_dates[date_val] = []
+                        processed_dates[date_val].append(str(time_val))  # Додаємо час як рядок
+
+                except ValueError:
+                    print(
+                        f"Попередження: Не вдалося розпарсити дату '{date_val}' у форматі '{DATE_FORMAT_IN_SHEET}'. Рядок пропущено.")
+                    continue  # Переходимо до наступного запису, якщо дата невалідна
+
+        # Сортуємо дати та час для кращого відображення
+        # Сортуємо дати (ключі словника)
+        sorted_date_keys = sorted(processed_dates.keys(),
+                                  key=lambda d: datetime.strptime(d, DATE_FORMAT_IN_SHEET).date())
+
+        # Створюємо фінальний відсортований словник
+        for date_key in sorted_date_keys:
+            # Сортуємо час для кожної дати (можна додати логіку сортування часу, якщо потрібно)
+            available_slots[date_key] = sorted(processed_dates[date_key])
+
+        print(f"Знайдено доступні слоти (на 7 днів): {available_slots}")
+
+        # print(f"Знайдено доступні слоти: {available_dates}")
+        # return available_dates
+        return available_slots
     except gspread.exceptions.SpreadsheetNotFound:
         print(f"ПОМИЛКА: Таблицю '{SPREADSHEET_NAME}' не знайдено. Перевірте назву та доступ.")
         raise
@@ -81,11 +125,13 @@ def get_available_dates():
         print(f"ПОМИЛКА: Аркуш '{SCHEDULE_WORKSHEET_NAME}' не знайдено. Перевірте назву.")
         raise
     except KeyError as e:
-        print(f"ПОМИЛКА: Відсутній необхідний стовпець в аркуші '{SCHEDULE_WORKSHEET_NAME}' (очікувались '{DATE_COLUMN}', '{TIME_COLUMN}', '{STATUS_COLUMN}'). Помилка: {e}")
+        print(
+            f"ПОМИЛКА: Відсутній необхідний стовпець в аркуші '{SCHEDULE_WORKSHEET_NAME}' (очікувались '{DATE_COLUMN}', '{TIME_COLUMN}', '{STATUS_COLUMN}'). Помилка: {e}")
         raise
     except Exception as e:
         print(f"ПОМИЛКА в get_available_dates: {type(e).__name__} - {e}")
-        raise # Перекидаємо помилку далі
+        raise  # Перекидаємо помилку далі
+
 
 # --- Оновлення статусу ---
 def update_status(date, time, status=STATUS_BOOKED):
@@ -107,12 +153,12 @@ def update_status(date, time, status=STATUS_BOOKED):
                 # Перевіряємо час у сусідній (другій) колонці
                 time_in_cell = sheet.cell(cell.row, 2).value
                 if time_in_cell == time:
-                    target_row = cell.row # Знайшли потрібний рядок
+                    target_row = cell.row  # Знайшли потрібний рядок
                     break
         except gspread.exceptions.CellNotFound:
-             print(f"Попередження: Не знайдено комірок з датою '{date}' у колонці 1.")
-             # Можна нічого не робити, або повернути помилку, якщо це неочікувано
-             pass # Просто виходимо, якщо дата не знайдена
+            print(f"Попередження: Не знайдено комірок з датою '{date}' у колонці 1.")
+            # Можна нічого не робити, або повернути помилку, якщо це неочікувано
+            pass  # Просто виходимо, якщо дата не знайдена
 
         if target_row:
             # Оновлюємо статус у третій колонці знайденого рядка
