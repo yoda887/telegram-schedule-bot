@@ -9,12 +9,15 @@ import sys
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, \
+    KeyboardButton, ReplyKeyboardRemove
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
-# Явний відносний імпорт
-from .google_sheets import get_available_dates, update_status, get_gspread_client, SPREADSHEET_NAME, REQUESTS_WORKSHEET_NAME, STATUS_BOOKED, STATUS_FREE # Імпортуємо константи
-# Імпорти фільтрів для Aiogram 3.x
+from .google_sheets import (
+    get_available_dates, update_status, get_gspread_client,
+    SPREADSHEET_NAME, REQUESTS_WORKSHEET_NAME, SCHEDULE_WORKSHEET_NAME,
+    STATUS_BOOKED, STATUS_FREE, DATE_FORMAT_IN_SHEET  # Імпортуємо константи
+)
 from aiogram.filters import CommandStart, StateFilter
 
 # --- Ініціалізація ---
@@ -27,134 +30,251 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+
 # --- Стани FSM ---
 class Form(StatesGroup):
-    # Змінюємо стан для імені на два окремих, щоб знати, з якої гілки прийшли
-    callback_name = State()  # Ім'я для запиту на дзвінок
-    booking_name = State()   # Ім'я для запису на консультацію
-    service_choice = State() # Вибір послуги (тепер це перший стан після /start)
-    phone_number = State()   # Номер для зворотного зв'язку
-    date = State()           # Вибір дати
-    time = State()           # Вибір часу
-    question = State()       # Питання
+    callback_name = State()
+    booking_name = State()
+    service_choice = State()
+    phone_number = State()
+    date = State()
+    time = State()
+    question = State()
+
 
 # --- Клавіатури ---
-# (Функції get_service_choice_keyboard, get_dates_keyboard, get_times_keyboard залишаються БЕЗ ЗМІН з попередньої версії)
 def get_service_choice_keyboard():
-    """Створює клавіатуру для вибору послуги."""
     builder = InlineKeyboardBuilder()
     builder.button(text="📞 Залишити контакт", callback_data="ask_contact")
     builder.button(text="📅 Записатися на консультацію", callback_data="book_consultation")
     builder.adjust(1)
     return builder.as_markup()
 
+
 def get_dates_keyboard(dates_dict):
-    """Створює клавіатуру з доступними датами."""
     builder = InlineKeyboardBuilder()
     # Сортуємо дати перед відображенням
-    sorted_dates = sorted(dates_dict.keys(), key=lambda d: datetime.strptime(d, "%d.%m.%Y").date()) # Припускаємо формат ДД.ММ.РРРР
+    try:
+        # Переконуємось, що DATE_FORMAT_IN_SHEET глобально доступний або переданий
+        sorted_dates = sorted(dates_dict.keys(),
+                              key=lambda d_str: datetime.strptime(d_str, DATE_FORMAT_IN_SHEET).date())
+    except Exception as e_sort:
+        print(f"Error sorting dates in get_dates_keyboard: {e_sort}. Using unsorted keys.", file=sys.stderr)
+        sorted_dates = list(dates_dict.keys())  # Fallback to unsorted
+
     for date_str in sorted_dates:
         builder.button(text=date_str, callback_data=f"date_{date_str}")
     builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_service_choice_from_date"))
     return builder.as_markup()
 
+
 def get_times_keyboard(times_list):
-    """Створює клавіатуру з доступним часом."""
     builder = InlineKeyboardBuilder()
-    # Сортуємо час перед відображенням (якщо потрібно, і якщо формат дозволяє просте сортування рядків)
+    # Сортуємо час (якщо він у форматі HH:MM, рядкове сортування спрацює)
     for time_str in sorted(times_list):
         builder.button(text=time_str, callback_data=f"time_{time_str}")
     builder.adjust(3)
+    builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_date_selection"))
     return builder.as_markup()
 
-# --- Обробники ---
 
-# Старт бота -> Показуємо кнопки вибору послуги
+def get_share_contact_keyboard():
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📱 Поділитися моїм номером телефону", request_contact=True)
+    builder.adjust(1)
+    return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
+
+
+# --- Обробники ---
+async def show_service_choice_menu(target_message_or_callback: types.TelegramObject, state: FSMContext,
+                                   user_name: str = None):
+    """Показує меню вибору послуг, редагуючи повідомлення або надсилаючи нове."""
+    await state.set_state(Form.service_choice)
+    keyboard = get_service_choice_keyboard()
+    text = f"Привіт, {user_name}! 👋\nЯк я можу допомогти?" if user_name else "Привіт! 👋\nЯк я можу допомогти?"
+
+    if isinstance(target_message_or_callback, CallbackQuery):
+        try:
+            await target_message_or_callback.message.edit_text(text, reply_markup=keyboard)
+        except Exception:
+            # Якщо редагування не вдалося (напр., текст той самий), надсилаємо нове для показу кнопок
+            await target_message_or_callback.message.answer(text, reply_markup=keyboard)
+    elif isinstance(target_message_or_callback, Message):
+        await target_message_or_callback.answer(text, reply_markup=keyboard)
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    keyboard = get_service_choice_keyboard()
-    await message.answer("Привіт! 👋\nЯк я можу допомогти?", reply_markup=keyboard)
-    # Встановлюємо стан очікування вибору послуги
-    await state.set_state(Form.service_choice)
+    # Одразу показуємо кнопки вибору послуги
+    await show_service_choice_menu(message, state)
 
-# Обробка натискання кнопок вибору послуги -> Питаємо ім'я
+
 @dp.callback_query(StateFilter(Form.service_choice))
 async def service_choice_callback_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     choice_data = callback.data
 
+    # Прибираємо кнопки з попереднього повідомлення
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception as e_edit_markup:
+        print(f"Could not edit reply markup: {e_edit_markup}", file=sys.stderr)
+
     if choice_data == "ask_contact":
-        # Питаємо ім'я і переходимо у стан callback_name
         await state.set_state(Form.callback_name)
-        await callback.message.edit_text("Добре, я запишу ваші контакти.\nБудь ласка, напишіть ваше ім'я:") # Редагуємо попереднє повідомлення
+        await callback.message.answer("Добре, я запишу ваші контакти.\nБудь ласка, напишіть ваше ім'я:")
     elif choice_data == "book_consultation":
-        # Питаємо ім'я і переходимо у стан booking_name
         await state.set_state(Form.booking_name)
-        await callback.message.edit_text("Добре, запишемо вас на консультацію.\nБудь ласка, напишіть ваше ім'я:") # Редагуємо попереднє повідомлення
+        await callback.message.answer("Добре, запишемо вас на консультацію.\nБудь ласка, напишіть ваше ім'я:")
     else:
         await callback.message.answer("Невідома опція. Почніть з /start.")
-        await state.clear()
+        await state.clear()  # Очищуємо стан, якщо опція невідома
 
-# Обробник отримання імені ПІСЛЯ вибору "Залишити контакт" -> Питаємо телефон
+
 @dp.message(StateFilter(Form.callback_name))
 async def callback_name_handler(message: Message, state: FSMContext):
-    await state.update_data(name=message.text) # Зберігаємо ім'я
+    await state.update_data(name=message.text)
     await state.set_state(Form.phone_number)
-    await message.answer("Дякую! Тепер введіть ваш контакт (телефон або інший спосіб зв'язку):")
+    keyboard = get_share_contact_keyboard()
+    await message.answer(
+        "Дякую! Тепер, будь ласка, поділіться вашим номером телефону, натиснувши кнопку нижче, "
+        "або введіть ваш контакт (телефон або інший спосіб зв'язку) вручну:",
+        reply_markup=keyboard
+    )
 
-# Обробник отримання імені ПІСЛЯ вибору "Записатися..." -> Показуємо дати
+
 @dp.message(StateFilter(Form.booking_name))
 async def booking_name_handler(message: Message, state: FSMContext):
-    await state.update_data(name=message.text) # Зберігаємо ім'я
+    user_name = message.text
+    await state.update_data(name=user_name)
     try:
+        print(f"DEBUG: User {user_name} selected booking. Getting available dates...", file=sys.stderr)
         available_dates = get_available_dates()
         if not available_dates:
-            await message.answer("На жаль, на даний момент немає доступних дат для запису. Спробуйте пізніше.")
+            await message.answer(
+                f"На жаль, {user_name}, на даний момент немає доступних дат для запису. Спробуйте пізніше.")
             await state.clear()
+            await show_service_choice_menu(message, state, user_name)  # Повертаємо на вибір послуги
             return
 
         keyboard = get_dates_keyboard(available_dates)
-        await message.answer("Дякую! Ось доступні дати для запису:\n(дійсні на найближчі 7 днів)\nВиберіть дату:", reply_markup=keyboard)
+        await message.answer(
+            f"Дякую, {user_name}! Ось доступні дати для запису:\n(дійсні на найближчі 7 днів)\nВиберіть дату:",
+            reply_markup=keyboard)
         await state.set_state(Form.date)
     except Exception as e:
-        print(f"Помилка отримання доступних дат (після введення імені): {type(e).__name__} - {e}", file=sys.stderr)
+        print(f"Помилка отримання доступних дат для {user_name}: {type(e).__name__} - {e}", file=sys.stderr)
         await message.answer("Виникла помилка при отриманні списку дат. Спробуйте пізніше або почніть з /start.")
         await state.clear()
 
-# Обробник отримання контакту (гілка 1) -> Зберігаємо, повертаємось на старт
-@dp.message(StateFilter(Form.phone_number))
-async def get_phone_number_handler(message: Message, state: FSMContext):
+
+@dp.message(StateFilter(Form.phone_number), F.contact)
+async def contact_shared_handler(message: Message, state: FSMContext):
+    contact_info = message.contact.phone_number
+    user_id = message.from_user.id
+    telegram_username = f"@{message.from_user.username}" if message.from_user.username else f"ID:{user_id}"
+    user_data = await state.get_data()
+    user_name = user_data.get("name", f"User {user_id}")
+
+    await state.update_data(contact=contact_info)
+
+    try:
+        client = get_gspread_client()
+        sheet = client.open(SPREADSHEET_NAME).worksheet(REQUESTS_WORKSHEET_NAME)
+        timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        print(f"DEBUG: Saving SHARED contact for {user_name} - {contact_info}...", file=sys.stderr)
+        sheet.append_row([
+            user_name, contact_info, "Запит на дзвінок (контакт пошарено)",
+            telegram_username, "", "", timestamp
+        ])
+        print("DEBUG: SHARED contact info saved.", file=sys.stderr)
+        await message.answer(
+            f"Дякую, {user_name}! Ваш номер телефону: {contact_info} отримано.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await cmd_start(message, state)
+    except Exception as e:
+        print(f"Помилка збереження SHARED контакту: {type(e).__name__} - {e}", file=sys.stderr)
+        await message.answer(
+            "Виникла помилка під час збереження ваших даних...",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.clear()
+
+
+@dp.message(StateFilter(Form.phone_number), F.text)
+async def get_phone_number_text_handler(message: Message, state: FSMContext):
     contact_info = message.text
     user_id = message.from_user.id
     telegram_username = f"@{message.from_user.username}" if message.from_user.username else f"ID:{user_id}"
     user_data = await state.get_data()
-    user_name = user_data.get("name", f"User {user_id}") # Отримуємо ім'я зі стану
+    user_name = user_data.get("name", f"User {user_id}")
+
+    await state.update_data(contact=contact_info)  # Зберігаємо введений контакт
 
     try:
         client = get_gspread_client()
-        sheet = client.open(SPREADSHEET_NAME).worksheet(REQUESTS_WORKSHEET_NAME) # Перевірте назву аркуша!
+        sheet = client.open(SPREADSHEET_NAME).worksheet(REQUESTS_WORKSHEET_NAME)
         timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        print(f"DEBUG: Saving contact info for {user_name}...", file=sys.stderr)
-        # Порядок: Ім’я | Контакт | Питання | Telegram ID | Дата | Час | Час Запису
+        print(f"DEBUG: Saving TYPED contact for {user_name} - {contact_info}...", file=sys.stderr)
         sheet.append_row([
-            user_name, contact_info, "Запит на дзвінок",
+            user_name, contact_info, "Запит на дзвінок (контакт введено)",
             telegram_username, "", "", timestamp
         ])
-        print("DEBUG: Contact info saved.", file=sys.stderr)
-        await message.answer(f"Дякую, {user_name}! Ваші контактні дані: '{contact_info}' отримані. Я зв'яжуся з вами.")
-        # Повертаємось на старт
+        print("DEBUG: TYPED contact info saved.", file=sys.stderr)
+        await message.answer(
+            f"Дякую, {user_name}! Ваші контактні дані: '{contact_info}' отримані. Я зв'яжуся з вами.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
         await cmd_start(message, state)
     except Exception as e:
-        print(f"Помилка збереження контакту в Google Sheets: {type(e).__name__} - {e}", file=sys.stderr)
-        await message.answer("Виникла помилка під час збереження ваших даних. Будь ласка, спробуйте пізніше.")
-        await state.clear() # Очищаємо стан у разі помилки
+        print(f"Помилка збереження TYPED контакту: {type(e).__name__} - {e}", file=sys.stderr)
+        await message.answer(
+            "Виникла помилка під час збереження ваших даних...",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.clear()
 
-# Обробка натискання кнопки з датою (гілка 2) -> Показуємо час
+
+# --- Обробники для кнопок "Назад" ---
+@dp.callback_query(F.data == "back_to_service_choice_from_date", StateFilter(Form.date))
+async def back_to_service_choice_from_date_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    user_data = await state.get_data()
+    user_name = user_data.get("name")
+    await show_service_choice_menu(callback, state, user_name)
+
+
+@dp.callback_query(F.data == "back_to_date_selection", StateFilter(Form.time))
+async def back_to_date_selection_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    user_data = await state.get_data()
+    user_name = user_data.get("name")  # Ім'я вже має бути в стані
+    try:
+        available_dates = get_available_dates()
+        if not available_dates:
+            await callback.message.edit_text("На жаль, на даний момент немає доступних дат. Повертаю на головне меню.")
+            await show_service_choice_menu(callback, state, user_name)
+            return
+
+        keyboard = get_dates_keyboard(available_dates)
+        await callback.message.edit_text(
+            f"{user_name}, ось доступні дати для запису:\n(дійсні на найближчі 7 днів)\nВиберіть дату:",
+            reply_markup=keyboard
+        )
+        await state.set_state(Form.date)
+    except Exception as e:
+        print(f"Помилка в back_to_date_selection_handler: {type(e).__name__} - {e}", file=sys.stderr)
+        await callback.message.edit_text("Виникла помилка. Повертаю на головне меню.")
+        await show_service_choice_menu(callback, state, user_name)
+
+
 @dp.callback_query(StateFilter(Form.date), F.data.startswith("date_"))
 async def get_date_callback_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    selected_date = callback.data.split("_")[1]
+    selected_date = callback.data.split("date_")[1]
     try:
         available_dates = get_available_dates()
         if selected_date in available_dates and available_dates[selected_date]:
@@ -162,23 +282,27 @@ async def get_date_callback_handler(callback: CallbackQuery, state: FSMContext):
             await state.update_data(date=selected_date)
             await state.set_state(Form.time)
             keyboard = get_times_keyboard(available_times)
-            await callback.message.edit_text( # Редагуємо повідомлення
+            await callback.message.edit_text(
                 f"Доступні часи на {selected_date}:\nВиберіть час:",
                 reply_markup=keyboard
             )
         else:
-            await callback.message.edit_text("На жаль, ця дата або час на неї вже недоступні. Будь ласка, почніть спочатку з /start.")
-            await state.clear()
+            keyboard = get_dates_keyboard(available_dates)  # Оновлюємо, бо дані могли змінитися
+            await callback.message.edit_text(
+                "На жаль, ця дата або час на неї вже недоступні. Спробуйте вибрати іншу або натисніть 'Назад'.",
+                reply_markup=keyboard
+            )
+            await state.set_state(Form.date)  # Залишаємось у стані вибору дати
     except Exception as e:
-        print(f"Помилка отримання/перевірки дати (з callback): {type(e).__name__} - {e}", file=sys.stderr)
-        await callback.message.answer("Виникла помилка при перевірці дати. Спробуйте ще раз або почніть з /start.")
+        print(f"Помилка отримання/перевірки дати (callback): {type(e).__name__} - {e}", file=sys.stderr)
+        await callback.message.answer("Виникла помилка. Почніть з /start.")
         await state.clear()
 
-# Обробка натискання кнопки з часом (гілка 2) -> Бронюємо, питаємо питання
+
 @dp.callback_query(StateFilter(Form.time), F.data.startswith("time_"))
 async def get_time_callback_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    selected_time = callback.data.split("_")[1]
+    selected_time = callback.data.split("time_")[1]
     user_data = await state.get_data()
     selected_date = user_data.get("date")
 
@@ -188,92 +312,86 @@ async def get_time_callback_handler(callback: CallbackQuery, state: FSMContext):
         return
 
     try:
-        current_available_dates = get_available_dates()
-        if selected_date in current_available_dates and selected_time in current_available_dates[selected_date]:
-            try:
-                update_status(selected_date, selected_time, STATUS_BOOKED)
-                await state.update_data(time=selected_time)
-                await state.set_state(Form.question)
-                await callback.message.edit_text( # Редагуємо повідомлення
-                    f"Час {selected_date} {selected_time} успішно заброньовано!\nТепер, будь ласка, опишіть коротко ваше питання або мету консультації:"
-                )
-            except Exception as e_update:
-                print(f"Помилка оновлення статусу в Google Sheets під час бронювання: {type(e_update).__name__} - {e_update}", file=sys.stderr)
-                await callback.message.edit_text("Виникла помилка під час бронювання часу. Можливо, хтось встиг раніше. Почніть з /start.")
-                await state.clear()
+        booking_successful = update_status(selected_date, selected_time, STATUS_BOOKED)
+        if booking_successful:
+            await state.update_data(time=selected_time)
+            await state.set_state(Form.question)
+            await callback.message.edit_text(
+                f"Час {selected_date} {selected_time} успішно заброньовано!\nТепер, будь ласка, опишіть коротко ваше питання або мету консультації:"
+            )
         else:
-            await callback.message.edit_text(f"На жаль, час {selected_time} на {selected_date} щойно зайняли. Почніть з /start.")
-            await state.clear()
+            current_available_dates = get_available_dates()
+            if selected_date in current_available_dates and current_available_dates[selected_date]:
+                keyboard = get_times_keyboard(current_available_dates[selected_date])
+                await callback.message.edit_text(
+                    f"На жаль, час {selected_time} на {selected_date} щойно зайняли або став недоступним. Спробуйте обрати інший:",
+                    reply_markup=keyboard
+                )
+                # Залишаємось у стані вибору часу для тієї ж дати
+                await state.set_state(Form.time)
+            else:  # Якщо на цю дату більше взагалі немає часу
+                await callback.message.edit_text(
+                    f"На жаль, на {selected_date} більше немає вільних слотів. Будь ласка, почніть з /start, щоб побачити актуальний графік.")
+                await state.clear()
     except Exception as e:
-        print(f"Помилка отримання/перевірки часу (з callback): {type(e).__name__} - {e}", file=sys.stderr)
-        await callback.message.answer("Виникла помилка при перевірці часу. Спробуйте ще раз або почніть з /start.")
+        print(f"Помилка під час спроби забронювати час: {type(e).__name__} - {e}", file=sys.stderr)
+        await callback.message.answer("Виникла критична помилка. Почніть з /start.")
         await state.clear()
 
-# Обробник отримання питання та збереження заявки (гілка 2) -> Зберігаємо, надсилаємо деталі, повертаємось на старт
+
 @dp.message(StateFilter(Form.question))
 async def get_question_handler(message: Message, state: FSMContext):
     question = message.text
     user_data = await state.get_data()
-    # Безпечно отримуємо дані зі стану
     user_name = user_data.get("name", f"User {message.from_user.id}")
     selected_date = user_data.get("date")
     selected_time = user_data.get("time")
     user_id = message.from_user.id
     telegram_username = f"@{message.from_user.username}" if message.from_user.username else f"ID:{user_id}"
-    contact_info = telegram_username # Контакт - ТГ, збережений для запису
+    contact_info = telegram_username  # Для гілки консультації контакт беремо з ТГ
 
-    # Перевірка, чи всі дані є
     if not selected_date or not selected_time:
-        await message.answer("Виникла помилка стану (не знайдено дату або час). Будь ласка, почніть спочатку: /start")
+        await message.answer("Виникла помилка стану (дата/час). Почніть з /start.")
         await state.clear()
         return
 
     try:
-        # --- Збереження в Google Sheets ---
         client = get_gspread_client()
-        sheet = client.open(SPREADSHEET_NAME).worksheet(REQUESTS_WORKSHEET_NAME) # Перевірте назву аркуша!
+        sheet = client.open(SPREADSHEET_NAME).worksheet(REQUESTS_WORKSHEET_NAME)
         timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         print(f"DEBUG: Saving appointment for {user_name}...", file=sys.stderr)
-        # Порядок: Ім’я | Контакт | Питання | Telegram ID | Дата | Час | Час Запису
         sheet.append_row([
             user_name, contact_info, question, str(user_id),
             selected_date, selected_time, timestamp
         ])
         print("DEBUG: Appointment saved to Заявки sheet.", file=sys.stderr)
+        await message.answer(
+            f"Дякую, {user_name}! Ваш запис на консультацію ({selected_date} {selected_time}) підтверджено!")
 
-        # --- Повідомлення 1: Підтвердження ---
-        await message.answer(f"Дякую, {user_name}! Ваш запис на консультацію ({selected_date} {selected_time}) підтверджено!")
+        lawyer_contact_for_booking_questions = "ВАШ_ТЕЛЕФОН_АБО_EMAIL_ДЛЯ_ЗАПИТАНЬ"  # ЗАМІНІТЬ
+        payment_details_text = 'Реквізити для оплати будуть надіслані вам додатково. Оплату необхідно здійснити до початку консультації.'  # ЗАМІНІТЬ/УТОЧНІТЬ
 
-        # --- Повідомлення 2: Деталі та Порядок Консультації ---
-        # !!! Важливо: Замініть плейсхолдери на реальні дані !!!
-        lawyer_contact_for_booking_questions = "ВАШ_ТЕЛЕФОН_АБО_EMAIL" # Замініть!
-        payment_details_text = 'Реквізити для оплати будуть надіслані вам додатково. Оплату необхідно здійснити до початку консультації.' # Замініть або уточніть!
-
-        # Використовуємо HTML для форматування, але ЗАМІНЮЄМО <br> на \n
         details_text_html = (
-            f"🗓️ <b>Деталі вашого запису:</b> {selected_date} о {selected_time}.\n\n"  # Замість <br>
-            f"<b>Порядок проведення онлайн-консультації:</b>\n\n"  # Замість <br>
-            f"1️⃣ <b>Платформа:</b> Ми зв'яжемося з вами незадовго до початку за контактом (<code>{contact_info}</code>), щоб узгодити зручну платформу (Zoom, Google Meet, Teams, Viber, WhatsApp, Telegram тощо) та надати посилання.\n\n"  # Замість <br>
-            f"2️⃣ <b>Підготовка:</b> Якщо ваше питання стосується документів, підготуйте їх копії/фото. Будь ласка, забезпечте стабільний інтернет та тихе місце.\n\n"  # Замість <br>
-            f"3️⃣ <b>Оплата:</b> Вартість - <b>1000 грн/год</b>. {payment_details_text}\n\n"  # Замість <br>
-            f"4️⃣ <b>Консультація:</b> Будьте готові обговорити ваше питання. Адвокат Меркович Богдан надасть вам необхідні роз'яснення та рекомендації.\n\n"  # Замість <br>
-            f"5️⃣ <b>Зв'язок:</b> З термінових питань щодо запису <i>до</i> консультації звертайтесь: {lawyer_contact_for_booking_questions}.\n\n"  # Замість <br>
+            f"🗓️ <b>Деталі вашого запису:</b> {selected_date} о {selected_time}.\n\n"
+            f"<b>Порядок проведення онлайн-консультації:</b>\n\n"
+            f"1️⃣ <b>Платформа:</b> Ми зв'яжемося з вами незадовго до початку за контактом (<code>{contact_info}</code>), щоб узгодити зручну платформу (Zoom, Google Meet, Teams, Viber, WhatsApp, Telegram тощо) та надати посилання.\n\n"
+            f"2️⃣ <b>Підготовка:</b> Якщо ваше питання стосується документів, підготуйте їх копії/фото. Будь ласка, забезпечте стабільний інтернет та тихе місце.\n\n"
+            f"3️⃣ <b>Оплата:</b> Вартість - <b>1000 грн/год</b>. {payment_details_text}\n\n"
+            f"4️⃣ <b>Консультація:</b> Будьте готові обговорити ваше питання. Адвокат Меркович Богдан надасть вам необхідні роз'яснення та рекомендації.\n\n"
+            f"5️⃣ <b>Зв'язок:</b> З термінових питань щодо запису <i>до</i> консультації звертайтесь: {lawyer_contact_for_booking_questions}.\n\n"
             f"Очікуйте на зв'язок для узгодження платформи!"
         )
-        # Надсилаємо повідомлення з HTML розміткою, parse_mode залишається HTML
-        print("DEBUG: Attempting to send details message...", file=sys.stderr)
         await message.answer(details_text_html, parse_mode="HTML")
-        print("DEBUG: Details message sent.", file=sys.stderr)
-
-        # --- Повернення на старт ---
-        print("DEBUG: Returning to start after successful booking and sending details.", file=sys.stderr)
-        # Викликаємо стартовий обробник, який очистить стан і почне діалог заново
-        await cmd_start(message, state)
-
+        await cmd_start(message, state)  # Повернення на старт
     except Exception as e:
         print(f"Помилка збереження запису консультації в Google Sheets: {type(e).__name__} - {e}", file=sys.stderr)
-        await message.answer("На жаль, сталася помилка під час фінального збереження вашого запису. Будь ласка, спробуйте ще раз пізніше або зв'яжіться з адміністратором.")
-        # У разі помилки збереження, також очищуємо стан
+        await message.answer("На жаль, сталася помилка під час фінального збереження вашого запису...")
         await state.clear()
 
-    # state.clear() тут вже не потрібен, якщо cmd_start викликається успішно
+# Блок запуску polling НЕ потрібен, оскільки FastAPI/Uvicorn керує циклом подій.
+# async def main_polling():
+# await dp.start_polling(bot)
+# if __name__ == '__main__':
+# import logging
+# logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+# asyncio.run(main_polling())

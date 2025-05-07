@@ -3,10 +3,10 @@
 import gspread
 # oauth2client застаріла, але залишаємо поки що, якщо ваш gspread < 5.0
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, date, timedelta
-import os
+from datetime import datetime, date, timedelta, timezone # Додано timezone
 import sys  # Для логування в stderr
 import os  # Потрібен для перевірки шляху
+import copy
 
 # --- Налаштування ---
 # !!! ЗАМІНІТЬ 'telegram-schedule-bot' НА ВАШУ РЕАЛЬНУ НАЗВУ ПАПКИ !!!
@@ -31,154 +31,170 @@ DATE_FORMAT_IN_SHEET = "%d.%m.%Y"
 # Області доступу API
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
+# --- Налаштування Кешу ---
+_CACHED_SCHEDULE_DATA = None # Тут буде зберігатися кеш { 'дата_рядок': ['час1', 'час2'], ... }
+_LAST_SCHEDULE_FETCH_TIME = None
+CACHE_TTL = timedelta(minutes=5) # Час життя кешу, наприклад 5 хвилин
+
+
 # --- Авторизація ---
 _CLIENT = None  # Кешуємо клієнт для ефективності
 
 
 # --- Авторизація ---
 def get_gspread_client():
-    """Авторизується та повертає клієнт gspread."""
-    try:
-        # Перевірка існування файлу ключа
-        if not os.path.exists(SERVICE_ACCOUNT_FILE):
-            error_msg = f"ERROR: Файл сервісного акаунту НЕ ЗНАЙДЕНО за шляхом: {SERVICE_ACCOUNT_FILE}"
-            print(error_msg)
-            raise FileNotFoundError(error_msg)
+    global _CLIENT
+    if _CLIENT is None:
+        # print("DEBUG: Attempting to authorize Google Sheets client...", file=sys.stderr)
+        try:
+            if not os.path.exists(SERVICE_ACCOUNT_FILE):
+                error_msg = f"ERROR: Файл сервісного акаунту НЕ ЗНАЙДЕНО за шляхом: {SERVICE_ACCOUNT_FILE} (CWD: {os.getcwd()})"
+                # print(error_msg, file=sys.stderr)
+                raise FileNotFoundError(error_msg)
+            creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, SCOPE)
+            _CLIENT = gspread.authorize(creds)
+            # print("Авторизація в Google Sheets успішна.", file=sys.stderr)
+        except Exception as e:
+            # print(f"ПОМИЛКА АВТОРИЗАЦІЇ Google Sheets: {type(e).__name__} - {e}", file=sys.stderr)
+            raise
+    return _CLIENT
 
-        creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, SCOPE)
-        client = gspread.authorize(creds)
-        print("Авторизація в Google Sheets успішна.")  # Лог успіху
-        return client
-    except FileNotFoundError as e:
-        print(f"ПОМИЛКА АВТОРИЗАЦІЇ (Файл не знайдено): {e}")
-        raise  # Перекидаємо помилку далі
-    except Exception as e:
-        # Логуємо будь-яку іншу помилку авторизації
-        print(f"ПОМИЛКА АВТОРИЗАЦІЇ Google Sheets: {type(e).__name__} - {e}")
-        raise  # Перекидаємо помилку далі, щоб її спіймав бот
+# --- Функція для інвалідації (скидання) кешу ---
+def invalidate_schedule_cache():
+    """Скидає кеш розкладу."""
+    global _CACHED_SCHEDULE_DATA, _LAST_SCHEDULE_FETCH_TIME
+    _CACHED_SCHEDULE_DATA = None
+    _LAST_SCHEDULE_FETCH_TIME = None
+    # print("DEBUG: Кеш розкладу інвалідовано (скинуто).", file=sys.stderr)
 
 
-# --- Отримання доступних слотів ---
+# --- Отримання доступних слотів (з кешуванням) ---
 def get_available_dates():
-    """Отримує доступні дати та час з аркуша 'Графік'."""
-    """фільтруючи за статусом 'вільно' та за датою (наступні 7 днів)."""
-    print(f"Спроба отримати доступні дати з аркуша '{SCHEDULE_WORKSHEET_NAME}'...")
-    available_dates = {}
-    available_slots = {}
+    """
+    Отримує доступні дати та час з кешу або з аркуша 'Графік',
+    фільтруючи за статусом 'вільно' та за датою (наступні 7 днів).
+    """
+    global _CACHED_SCHEDULE_DATA, _LAST_SCHEDULE_FETCH_TIME
+    now = datetime.now(timezone.utc)  # Використовуємо timezone-aware datetime
+
+    # Перевіряємо кеш
+    if _CACHED_SCHEDULE_DATA is not None and \
+            _LAST_SCHEDULE_FETCH_TIME is not None and \
+            (now - _LAST_SCHEDULE_FETCH_TIME) < CACHE_TTL:
+        # print("DEBUG: Повернення доступних дат з КЕШУ.", file=sys.stderr)
+        # Повертаємо глибоку копію, щоб випадково не змінити кеш
+        return copy.deepcopy(_CACHED_SCHEDULE_DATA)
+
+    # print(f"DEBUG: Кеш застарів або порожній. Завантаження актуальних дат з Google Sheets...", file=sys.stderr)
+    available_slots = {}  # Змінено з available_dates на available_slots для ясності
     try:
         client = get_gspread_client()
         sheet = client.open(SPREADSHEET_NAME).worksheet(SCHEDULE_WORKSHEET_NAME)
-        print(f"Аркуш '{SCHEDULE_WORKSHEET_NAME}' відкрито. Отримання записів...")
-        # Використовуємо get_all_records(), припускаючи, що перший рядок - заголовки
-        records = sheet.get_all_records()
-        print(f"Отримано {len(records)} записів.")
+        # print(f"Аркуш '{SCHEDULE_WORKSHEET_NAME}' відкрито. Отримання записів...", file=sys.stderr)
+        records = sheet.get_all_records()  # Читаємо всі дані
+        # print(f"Отримано {len(records)} записів.", file=sys.stderr)
 
         today = date.today()
-        end_date = today + timedelta(days=7)  # Сьогодні + 6 наступних днів
-
-        processed_dates = {}  # Словник для групування часу за датами
+        end_date = today + timedelta(days=7)
+        processed_dates_temp = {}
 
         for record in records:
-            # Безпечно отримуємо значення, перевіряючи наявність ключів
-            date_val = record.get(DATE_COLUMN)
+            date_str = record.get(DATE_COLUMN)
             time_val = record.get(TIME_COLUMN)
             status_val = record.get(STATUS_COLUMN)
 
-            # Перевіряємо, чи всі потрібні дані є, і чи статус 'вільно'
-            if date_val and time_val and status_val and str(status_val).strip().lower() == STATUS_FREE:
-
+            if date_str and time_val and status_val and str(status_val).strip().lower() == STATUS_FREE:
                 try:
-                    # Парсимо дату з рядка згідно з вказаним форматом
-                    record_date = datetime.strptime(str(date_val), DATE_FORMAT_IN_SHEET).date()
-
-                    # Перевіряємо, чи дата входить у потрібний діапазон (сьогодні + 6 днів)
-                    if today <= record_date < end_date:
-                        # Використовуємо рядок дати як ключ, щоб зберегти оригінальний формат
-                        if date_val not in processed_dates:
-                            processed_dates[date_val] = []
-                        processed_dates[date_val].append(str(time_val))  # Додаємо час як рядок
-
+                    record_date_obj = datetime.strptime(str(date_str), DATE_FORMAT_IN_SHEET).date()
+                    if today <= record_date_obj < end_date:
+                        if date_str not in processed_dates_temp:
+                            processed_dates_temp[date_str] = []
+                        processed_dates_temp[date_str].append(str(time_val))
                 except ValueError:
-                    print(
-                        f"Попередження: Не вдалося розпарсити дату '{date_val}' у форматі '{DATE_FORMAT_IN_SHEET}'. Рядок пропущено.")
-                    continue  # Переходимо до наступного запису, якщо дата невалідна
+                    # print(
+                    #     f"Попередження: Не розпарсено дату '{date_str}' в форматі '{DATE_FORMAT_IN_SHEET}'. Пропущено.",
+                    #     file=sys.stderr)
+                    continue
 
-        # Сортуємо дати та час для кращого відображення
-        # Сортуємо дати (ключі словника)
-        sorted_date_keys = sorted(processed_dates.keys(),
+        sorted_date_keys = sorted(processed_dates_temp.keys(),
                                   key=lambda d: datetime.strptime(d, DATE_FORMAT_IN_SHEET).date())
-
-        # Створюємо фінальний відсортований словник
         for date_key in sorted_date_keys:
-            # Сортуємо час для кожної дати (можна додати логіку сортування часу, якщо потрібно)
-            available_slots[date_key] = sorted(processed_dates[date_key])
+            available_slots[date_key] = sorted(processed_dates_temp[date_key])
 
-        print(f"Знайдено доступні слоти (на 7 днів): {available_slots}")
+        # Зберігаємо в кеш
+        _CACHED_SCHEDULE_DATA = available_slots
+        _LAST_SCHEDULE_FETCH_TIME = now
+        # print(f"DEBUG: Кеш оновлено новими даними. TTL: {CACHE_TTL}. Слоти: {available_slots}", file=sys.stderr)
+        return copy.deepcopy(available_slots)  # Повертаємо копію
 
         # print(f"Знайдено доступні слоти: {available_dates}")
         # return available_dates
-        return available_slots
+        # return available_slots
     except gspread.exceptions.SpreadsheetNotFound:
-        print(f"ПОМИЛКА: Таблицю '{SPREADSHEET_NAME}' не знайдено. Перевірте назву та доступ.")
+        # print(f"ПОМИЛКА: Таблицю '{SPREADSHEET_NAME}' не знайдено. Перевірте назву та доступ.")
         raise
     except gspread.exceptions.WorksheetNotFound:
-        print(f"ПОМИЛКА: Аркуш '{SCHEDULE_WORKSHEET_NAME}' не знайдено. Перевірте назву.")
+        # print(f"ПОМИЛКА: Аркуш '{SCHEDULE_WORKSHEET_NAME}' не знайдено. Перевірте назву.")
         raise
     except KeyError as e:
-        print(
-            f"ПОМИЛКА: Відсутній необхідний стовпець в аркуші '{SCHEDULE_WORKSHEET_NAME}' (очікувались '{DATE_COLUMN}', '{TIME_COLUMN}', '{STATUS_COLUMN}'). Помилка: {e}")
+        # print(
+        #     f"ПОМИЛКА: Відсутній необхідний стовпець в аркуші '{SCHEDULE_WORKSHEET_NAME}' (очікувались '{DATE_COLUMN}', '{TIME_COLUMN}', '{STATUS_COLUMN}'). Помилка: {e}")
         raise
     except Exception as e:
-        print(f"ПОМИЛКА в get_available_dates: {type(e).__name__} - {e}")
-        raise  # Перекидаємо помилку далі
+        # print(f"ПОМИЛКА в get_available_dates: {type(e).__name__} - {e}", file=sys.stderr)
+        invalidate_schedule_cache() # Скидаємо кеш у разі будь-якої помилки завантаження
+        raise
 
 
-# --- Оновлення статусу ---
-def update_status(date, time, status=STATUS_BOOKED):
-    """Оновлює статус для певного слоту часу в аркуші 'Графік'."""
-    print(f"Спроба оновити статус для {date} {time} на '{status}' в аркуші '{SCHEDULE_WORKSHEET_NAME}'...")
+# --- Оновлення статусу (з інвалідацією кешу) ---
+def update_status(date_str, time_str, new_status=STATUS_BOOKED):
+    """
+    Перевіряє, чи слот вільний, оновлює його статус та інвалідує кеш.
+    Повертає True, якщо статус успішно оновлено.
+    Повертає False, якщо слот вже був зайнятий або не знайдений.
+    """
+    # print(f"Attempting to check and update status for {date_str} {time_str} to '{new_status}'...", file=sys.stderr)
     try:
         client = get_gspread_client()
         sheet = client.open(SPREADSHEET_NAME).worksheet(SCHEDULE_WORKSHEET_NAME)
-        print(f"Аркуш '{SCHEDULE_WORKSHEET_NAME}' відкрито для оновлення статусу.")
-
-        # Шукаємо рядок, що відповідає даті та часу
-        # Припускаємо: Колонка 1 = Дата, Колонка 2 = Час, Колонка 3 = Статус
-        # !!! Ця логіка може потребувати адаптації під ВАШУ структуру таблиці !!!
-        target_row = None
+        # ... (логіка пошуку target_row_gspread_idx та current_status_in_sheet як у попередній версії) ...
+        all_data = sheet.get_all_values()  # Потрібно для перевірки поточного статусу
+        if not all_data: return False  # Аркуш порожній
+        header = all_data[0]
         try:
-            # Знаходимо всі комірки з потрібною датою в першій колонці
-            date_cells = sheet.findall(date, in_column=1)
-            for cell in date_cells:
-                # Перевіряємо час у сусідній (другій) колонці
-                time_in_cell = sheet.cell(cell.row, 2).value
-                if time_in_cell == time:
-                    target_row = cell.row  # Знайшли потрібний рядок
-                    break
-        except gspread.exceptions.CellNotFound:
-            print(f"Попередження: Не знайдено комірок з датою '{date}' у колонці 1.")
-            # Можна нічого не робити, або повернути помилку, якщо це неочікувано
-            pass  # Просто виходимо, якщо дата не знайдена
+            date_col_idx = header.index(DATE_COLUMN)
+            time_col_idx = header.index(TIME_COLUMN)
+            status_col_idx = header.index(STATUS_COLUMN)
+        except ValueError as e:
+            # print(f"ERROR: Column name missing: {e}", file=sys.stderr)
+            return False
 
-        if target_row:
-            # Оновлюємо статус у третій колонці знайденого рядка
-            sheet.update_cell(target_row, 3, status)
-            print(f"Статус для {date} {time} успішно оновлено на '{status}' у рядку {target_row}.")
+        target_row_gspread_idx = None
+        current_status_in_sheet = None
+        for i, row_values in enumerate(all_data[1:], start=2):
+            if row_values[date_col_idx] == date_str and row_values[time_col_idx] == time_str:
+                target_row_gspread_idx = i
+                current_status_in_sheet = str(row_values[status_col_idx]).strip().lower()
+                break
+
+        if target_row_gspread_idx:
+            if current_status_in_sheet == STATUS_FREE:
+                sheet.update_cell(target_row_gspread_idx, status_col_idx + 1, new_status)
+                # print(f"Status updated for {date_str} {time_str} to '{new_status}'.", file=sys.stderr)
+                invalidate_schedule_cache()  # !!! Скидаємо кеш після успішного оновлення !!!
+                return True
+            else:
+                # print(f"Slot {date_str} {time_str} already '{current_status_in_sheet}'. Booking failed.",
+                #       file=sys.stderr)
+                return False
         else:
-            # Якщо рядок не знайдено - логуємо це
-            print(f"ПОМИЛКА: Не знайдено рядок з датою '{date}' та часом '{time}' для оновлення статусу.")
-            # Можливо, варто викликати виняток, щоб бот знав про проблему
-            # raise ValueError(f"Не знайдено слот для оновлення статусу: {date} {time}")
+            # print(f"ERROR: Slot for {date_str} {time_str} not found for update.", file=sys.stderr)
+            return False
 
-    except gspread.exceptions.SpreadsheetNotFound:
-        print(f"ПОМИЛКА: Таблицю '{SPREADSHEET_NAME}' не знайдено. Перевірте назву та доступ.")
-        raise
-    except gspread.exceptions.WorksheetNotFound:
-        print(f"ПОМИЛКА: Аркуш '{SCHEDULE_WORKSHEET_NAME}' не знайдено. Перевірте назву.")
-        raise
     except Exception as e:
-        print(f"ПОМИЛКА в update_status: {type(e).__name__} - {e}")
-        raise
+        # print(f"ERROR in update_status: {type(e).__name__} - {e}", file=sys.stderr)
+        # У разі помилки API, кеш не інвалідуємо, бо дані могли не змінитися
+        return False
 
 # Функція для збереження заявки (виклик з bot.py)
 # Можна залишити в bot.py або перенести сюди для кращої організації
