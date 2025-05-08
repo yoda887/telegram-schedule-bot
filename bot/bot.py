@@ -35,6 +35,20 @@ from .google_sheets import (
 load_dotenv()  # Завантажуємо змінні з .env файлу
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# !!! НОВЕ: Завантажуємо ID адміна !!!
+ADMIN_CHAT_ID_STR = os.getenv("ADMIN_CHAT_ID")
+ADMIN_CHAT_ID = None # За замовчуванням None
+if ADMIN_CHAT_ID_STR:
+    try:
+        ADMIN_CHAT_ID = int(ADMIN_CHAT_ID_STR) # Перетворюємо на число
+        print(f"DEBUG: Admin chat ID loaded: {ADMIN_CHAT_ID}", file=sys.stderr)
+    except ValueError:
+        print(f"ПОМИЛКА: ADMIN_CHAT_ID ('{ADMIN_CHAT_ID_STR}') в .env файлі не є числом! Сповіщення адміну вимкнено.", file=sys.stderr)
+else:
+    print("ПОПЕРЕДЖЕННЯ: ADMIN_CHAT_ID не знайдено в .env файлі! Сповіщення адміну вимкнено.", file=sys.stderr)
+
+
 if not BOT_TOKEN:
     # Використовуємо sys.stderr для логів помилок
     print("ПОМИЛКА: BOT_TOKEN не знайдено в змінних оточення! Перевірте .env файл.", file=sys.stderr)
@@ -265,6 +279,29 @@ async def contact_shared_handler(message: Message, state: FSMContext):
             telegram_username, "", "", timestamp
         ])
         print("DEBUG: SHARED contact info saved.", file=sys.stderr)
+
+        # --- Надсилання сповіщення адміну ---
+        if ADMIN_CHAT_ID:  # Надсилаємо, тільки якщо ID адміна вказано
+            notification_text = (
+                f"🔔 **Новий запит на дзвінок (Контакт пошарено)**\n\n"
+                f"👤 **Ім'я:** {user_name}\n"
+                f"📞 **Контакт:** `{contact_info}`\n"  # Використовуємо ` для копіювання номера
+                f"💬 **Telegram:** {telegram_username} (ID: {user_id})\n"
+                f"⏰ **Час запиту:** {timestamp}"
+            )
+            try:
+                await bot.send_message(ADMIN_CHAT_ID, notification_text,
+                                       parse_mode="MarkdownV2")  # Використовуємо Markdown
+                print(f"DEBUG: Sent shared contact notification to admin chat {ADMIN_CHAT_ID}", file=sys.stderr)
+            except Exception as e_notify:
+                # Логуємо помилку надсилання сповіщення, але не перериваємо користувача
+                print(
+                    f"ERROR: Could not send shared contact notification to admin {ADMIN_CHAT_ID}: {type(e_notify).__name__} - {e_notify}",
+                    file=sys.stderr)
+        # ------------------------------------
+
+
+
         # Надсилаємо підтвердження і прибираємо клавіатуру
         await message.answer(
             f"Дякую, {user_name}! Ваш номер телефону: {contact_info} отримано.",
@@ -305,6 +342,26 @@ async def get_phone_number_text_handler(message: Message, state: FSMContext):
             telegram_username, "", "", timestamp
         ])
         print("DEBUG: TYPED contact info saved.", file=sys.stderr)
+
+        # --- Надсилання сповіщення адміну ---
+        if ADMIN_CHAT_ID:
+            notification_text = (
+                f"🔔 **Новий запит на дзвінок (Контакт введено)**\n\n"
+                f"👤 **Ім'я:** {user_name}\n"
+                f"📞 **Контакт:** {contact_info}\n"  # Не беремо в ``, бо може бути не телефон
+                f"💬 **Telegram:** {telegram_username} (ID: {user_id})\n"
+                f"⏰ **Час запиту:** {timestamp}"
+            )
+            try:
+                await bot.send_message(ADMIN_CHAT_ID, notification_text, parse_mode="MarkdownV2")
+                print(f"DEBUG: Sent typed contact notification to admin chat {ADMIN_CHAT_ID}", file=sys.stderr)
+            except Exception as e_notify:
+                print(
+                    f"ERROR: Could not send typed contact notification to admin {ADMIN_CHAT_ID}: {type(e_notify).__name__} - {e_notify}",
+                    file=sys.stderr)
+        # ------------------------------------
+
+
         # Надсилаємо підтвердження і прибираємо клавіатуру
         await message.answer(
             f"Дякую, {user_name}! Ваші контактні дані: '{contact_info}' отримані. Я зв'яжуся з вами.",
@@ -465,6 +522,26 @@ async def get_question_handler(message: Message, state: FSMContext):
             selected_date, selected_time, timestamp
         ])
         print("DEBUG: Appointment saved to Заявки sheet.", file=sys.stderr)
+
+        # --- Надсилання сповіщення адміну ---
+        if ADMIN_CHAT_ID:
+            notification_text = (
+                f"📅 **Новий запис на консультацію!**\n\n"
+                f"👤 **Ім'я:** {user_name}\n"
+                f"🗓️ **Дата:** {selected_date}\n"
+                f"🕒 **Час:** {selected_time}\n"
+                f"❓ **Питання:** {question}\n"
+                f"💬 **Telegram:** {telegram_username} (ID: {user_id})\n"
+                f"⏰ **Час запису:** {timestamp}"
+            )
+            try:
+                await bot.send_message(ADMIN_CHAT_ID, notification_text, parse_mode="MarkdownV2")
+                print(f"DEBUG: Sent appointment notification to admin chat {ADMIN_CHAT_ID}", file=sys.stderr)
+            except Exception as e_notify:
+                print(
+                    f"ERROR: Could not send appointment notification to admin {ADMIN_CHAT_ID}: {type(e_notify).__name__} - {e_notify}",
+                    file=sys.stderr)
+        # ------------------------------------
 
         # Повідомлення 1: Підтвердження
         await message.answer(
