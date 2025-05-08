@@ -36,7 +36,6 @@ load_dotenv()  # Завантажуємо змінні з .env файлу
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# !!! НОВЕ: Завантажуємо ID адміна !!!
 ADMIN_CHAT_ID_STR = os.getenv("ADMIN_CHAT_ID")
 ADMIN_CHAT_ID = None # За замовчуванням None
 if ADMIN_CHAT_ID_STR:
@@ -282,16 +281,15 @@ async def contact_shared_handler(message: Message, state: FSMContext):
 
         # --- Надсилання сповіщення адміну ---
         if ADMIN_CHAT_ID:  # Надсилаємо, тільки якщо ID адміна вказано
-            notification_text = (
-                f"🔔 **Новий запит на дзвінок (Контакт пошарено)**\n\n"
-                f"👤 **Ім'я:** {user_name}\n"
-                f"📞 **Контакт:** `{contact_info}`\n"  # Використовуємо ` для копіювання номера
-                f"💬 **Telegram:** {telegram_username} (ID: {user_id})\n"
-                f"⏰ **Час запиту:** {timestamp}"
+            notification_text_html = (
+                f"📅 <b>Новий запит на дзвінок!</b>\n\n"
+                f"👤 <b>Ім'я:</b> {user_name}\n"
+                 f"❓ <b>Контакт:</b> {contact_info}\n"  # Потрібно екранувати < > & якщо вони можуть бути в питанні
+                f"💬 <b>Telegram:</b> {telegram_username} (ID: <code>{user_id}</code>)\n"  # Використовуємо code для ID
+                f"⏰ <b>Час запису:</b> {timestamp}"
             )
             try:
-                await bot.send_message(ADMIN_CHAT_ID, notification_text,
-                                       parse_mode="MarkdownV2")  # Використовуємо Markdown
+                await bot.send_message(ADMIN_CHAT_ID, notification_text_html, parse_mode="HTML")
                 print(f"DEBUG: Sent shared contact notification to admin chat {ADMIN_CHAT_ID}", file=sys.stderr)
             except Exception as e_notify:
                 # Логуємо помилку надсилання сповіщення, але не перериваємо користувача
@@ -346,11 +344,11 @@ async def get_phone_number_text_handler(message: Message, state: FSMContext):
         # --- Надсилання сповіщення адміну ---
         if ADMIN_CHAT_ID:
             notification_text = (
-                f"🔔 **Новий запит на дзвінок (Контакт введено)**\n\n"
-                f"👤 **Ім'я:** {user_name}\n"
-                f"📞 **Контакт:** {contact_info}\n"  # Не беремо в ``, бо може бути не телефон
-                f"💬 **Telegram:** {telegram_username} (ID: {user_id})\n"
-                f"⏰ **Час запиту:** {timestamp}"
+                f"🔔 \\*\\*Новий запит на дзвінок \\(Контакт введено\\)\\*\\*\n\n"
+                f"👤 \\*\\*Ім\\'я\\:\\*\\* {user_name}\n"
+                f"📞 \\*\\*Контакт\\:\\*\\* {contact_info}\n"  # Не беремо в ``, бо може бути не телефон
+                f"💬 \\*\\*Telegram\\:\\*\\* {telegram_username} \\(ID: {user_id}\\)\n"
+                f"⏰ \\*\\*Час запиту\\:\\*\\* {timestamp}"
             )
             try:
                 await bot.send_message(ADMIN_CHAT_ID, notification_text, parse_mode="MarkdownV2")
@@ -525,17 +523,17 @@ async def get_question_handler(message: Message, state: FSMContext):
 
         # --- Надсилання сповіщення адміну ---
         if ADMIN_CHAT_ID:
-            notification_text = (
-                f"📅 **Новий запис на консультацію!**\n\n"
-                f"👤 **Ім'я:** {user_name}\n"
-                f"🗓️ **Дата:** {selected_date}\n"
-                f"🕒 **Час:** {selected_time}\n"
-                f"❓ **Питання:** {question}\n"
-                f"💬 **Telegram:** {telegram_username} (ID: {user_id})\n"
-                f"⏰ **Час запису:** {timestamp}"
+            notification_text_html = (
+                f"📅 <b>Новий запис на консультацію!</b>\n\n"
+                f"👤 <b>Ім'я:</b> {user_name}\n"
+                f"🗓️ <b>Дата:</b> {selected_date}\n"
+                f"🕒 <b>Час:</b> {selected_time}\n"
+                f"❓ <b>Питання:</b> {question}\n"  # Потрібно екранувати < > & якщо вони можуть бути в питанні
+                f"💬 <b>Telegram:</b> {telegram_username} (ID: <code>{user_id}</code>)\n"  # Використовуємо code для ID
+                f"⏰ <b>Час запису:</b> {timestamp}"
             )
             try:
-                await bot.send_message(ADMIN_CHAT_ID, notification_text, parse_mode="MarkdownV2")
+                await bot.send_message(ADMIN_CHAT_ID, notification_text_html, parse_mode="HTML")
                 print(f"DEBUG: Sent appointment notification to admin chat {ADMIN_CHAT_ID}", file=sys.stderr)
             except Exception as e_notify:
                 print(

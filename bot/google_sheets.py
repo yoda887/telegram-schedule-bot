@@ -43,81 +43,82 @@ _CLIENT = None  # Кешуємо клієнт для ефективності
 
 
 def get_client_provided_name(user_id: int):
-    """
-    Шукає збережене ім'я клієнта за його Telegram user_id.
-    Повертає ім'я або None, якщо не знайдено.
-    """
-    print(f"DEBUG: Attempting to get client name for user_id: {user_id} from '{CLIENTS_WORKSHEET_NAME}' sheet...",
-          file=sys.stderr)
+    """Шукає збережене ім'я клієнта. Повертає ім'я або None."""
+    print(f"DEBUG: Getting client name for user_id: {user_id}...", file=sys.stderr)
     try:
         client = get_gspread_client()
         sheet = client.open(SPREADSHEET_NAME).worksheet(CLIENTS_WORKSHEET_NAME)
-
-        # Шукаємо користувача за ID (припускаємо, що ID в першій колонці)
+        target_cell = None
         try:
-            cell = sheet.find(str(user_id), in_column=1)  # user_id зазвичай int, треба перевести в рядок для пошуку
-            if cell:
-                # Припускаємо, що 'provided_name' знаходиться в 3-й колонці (C)
-                provided_name = sheet.cell(cell.row, 3).value
-                if provided_name:
-                    print(f"DEBUG: Found client name: '{provided_name}' for user_id: {user_id}", file=sys.stderr)
-                    return str(provided_name)
-        except gspread.exceptions.CellNotFound:
-            print(f"DEBUG: Client with user_id: {user_id} not found in '{CLIENTS_WORKSHEET_NAME}'.", file=sys.stderr)
+            # find може генерувати CellNotFound в СТАРИХ версіях,
+            # або повертати None/генерувати іншу помилку в нових при не знаходженні.
+            # Краще перевіряти результат.
+            target_cell = sheet.find(str(user_id), in_column=1)
+        except gspread.exceptions.CellNotFound: # Залишаємо про всяк випадок для старих версій
+             print(f"DEBUG: CellNotFound caught for user_id: {user_id}.", file=sys.stderr)
+             target_cell = None # Явно вказуємо, що не знайдено
+        except Exception as e_find:
+             print(f"ERROR during sheet.find() in get_client_provided_name: {type(e_find).__name__} - {e_find}", file=sys.stderr)
+             return None # Помилка пошуку
+
+        if target_cell:
+            # Знайдено, припускаємо, що ім'я в колонці C (індекс 2)
+            provided_name = sheet.cell(target_cell.row, 3).value
+            if provided_name:
+                print(f"DEBUG: Found name '{provided_name}' for user_id {user_id}.", file=sys.stderr)
+                return str(provided_name)
+            else:
+                print(f"DEBUG: Found user_id {user_id}, but name is empty.", file=sys.stderr)
+                return None
+        else:
+            print(f"DEBUG: Client with user_id {user_id} not found.", file=sys.stderr)
             return None
-        except Exception as e_find:  # Інші можливі помилки gspread при пошуку
-            print(f"ERROR finding client in '{CLIENTS_WORKSHEET_NAME}': {type(e_find).__name__} - {e_find}",
-                  file=sys.stderr)
-            return None  # На випадок помилки краще повернути None, ніж впасти
-
-        print(f"DEBUG: Client with user_id: {user_id} not found or no name recorded.", file=sys.stderr)
-        return None  # Не знайдено або ім'я порожнє
-
     except Exception as e:
         print(f"ERROR in get_client_provided_name: {type(e).__name__} - {e}", file=sys.stderr)
-        return None  # У разі будь-якої помилки повертаємо None
-
+        return None
 
 def save_or_update_client_name(user_id: int, telegram_username: str, provided_name: str):
-    """
-    Зберігає або оновлює ім'я клієнта в аркуші 'Клиенты'.
-    """
-    print(
-        f"DEBUG: Attempting to save/update client name for user_id: {user_id}, name: {provided_name} in '{CLIENTS_WORKSHEET_NAME}'...",
-        file=sys.stderr)
+    """Зберігає або оновлює ім'я клієнта."""
+    print(f"DEBUG: Saving/Updating client name for user_id: {user_id}, name: {provided_name}...", file=sys.stderr)
     try:
         client = get_gspread_client()
         sheet = client.open(SPREADSHEET_NAME).worksheet(CLIENTS_WORKSHEET_NAME)
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-
+        target_cell = None
         try:
-            cell = sheet.find(str(user_id), in_column=1)  # Шукаємо за ID
-            # Якщо знайдено, оновлюємо ім'я та last_seen
-            sheet.update_cell(cell.row, 2, telegram_username or "")  # telegram_username (B)
-            sheet.update_cell(cell.row, 3, provided_name)  # provided_name (C)
-            sheet.update_cell(cell.row, 5, now_str)  # last_seen (E)
-            print(f"DEBUG: Updated client name for user_id: {user_id}", file=sys.stderr)
-        except gspread.exceptions.CellNotFound:
-            # Якщо не знайдено, додаємо новий рядок
-            sheet.append_row([
-                str(user_id),  # telegram_user_id (A)
-                telegram_username or "",  # telegram_username (B)
-                provided_name,  # provided_name (C)
-                now_str,  # first_seen (D)
-                now_str  # last_seen (E)
-            ])
-            print(f"DEBUG: Added new client with user_id: {user_id}", file=sys.stderr)
-        except Exception as e_update:
-            print(
-                f"ERROR updating/appending client in '{CLIENTS_WORKSHEET_NAME}': {type(e_update).__name__} - {e_update}",
-                file=sys.stderr)
-            # Можна просто пропустити помилку запису імені, щоб не ламати основний потік
-            pass
+            target_cell = sheet.find(str(user_id), in_column=1)
+        except gspread.exceptions.CellNotFound: # Для старих версій
+            target_cell = None
+        except Exception as e_find:
+             print(f"ERROR during sheet.find() in save_or_update_client_name: {type(e_find).__name__} - {e_find}", file=sys.stderr)
+             # У разі помилки пошуку, не намагаємося додавати/оновлювати
+             return
+
+        if target_cell:
+            # ЗНАЙДЕНО - Оновлюємо
+            try:
+                sheet.update_cell(target_cell.row, 2, telegram_username or "") # Username (B)
+                sheet.update_cell(target_cell.row, 3, provided_name)         # Name (C)
+                sheet.update_cell(target_cell.row, 5, now_str)               # last_seen (E)
+                print(f"DEBUG: Updated client name for user_id: {user_id}", file=sys.stderr)
+            except Exception as e_update:
+                 print(f"ERROR updating client in '{CLIENTS_WORKSHEET_NAME}': {type(e_update).__name__} - {e_update}", file=sys.stderr)
+        else:
+            # НЕ ЗНАЙДЕНО - Додаємо новий рядок
+            try:
+                sheet.append_row([
+                    str(user_id),         # telegram_user_id (A)
+                    telegram_username or "", # telegram_username (B)
+                    provided_name,      # provided_name (C)
+                    now_str,            # first_seen (D)
+                    now_str             # last_seen (E)
+                ])
+                print(f"DEBUG: Added new client with user_id: {user_id}", file=sys.stderr)
+            except Exception as e_append:
+                 print(f"ERROR appending client in '{CLIENTS_WORKSHEET_NAME}': {type(e_append).__name__} - {e_append}", file=sys.stderr)
 
     except Exception as e:
         print(f"ERROR in save_or_update_client_name: {type(e).__name__} - {e}", file=sys.stderr)
-        # Не перекидаємо помилку далі, щоб не переривати основний потік бота через помилку збереження імен
-
 
 # --- Авторизація ---
 def get_gspread_client():
