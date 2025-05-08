@@ -3,7 +3,7 @@
 import gspread
 # oauth2client застаріла, але залишаємо поки що, якщо ваш gspread < 5.0
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, date, timedelta, timezone # Додано timezone
+from datetime import datetime, date, timedelta, timezone  # Додано timezone
 import sys  # Для логування в stderr
 import os  # Потрібен для перевірки шляху
 import copy
@@ -24,6 +24,8 @@ STATUS_COLUMN = 'Статус'
 STATUS_FREE = 'вільно'  # Статус вільного часу (у нижньому регістрі для порівняння)
 STATUS_BOOKED = 'Заброньовано'  # Статус для оновлення
 
+CLIENTS_WORKSHEET_NAME = "Клиенты"  # Новая константа
+
 # !!! ВАЖЛИВО: Вкажіть ТОЧНИЙ формат дати, який використовується у вашому стовпці 'Дата' в Google Sheets !!!
 # Приклади: "%d.%m.%Y" для "05.05.2025", "%Y-%m-%d" для "2025-05-05"
 DATE_FORMAT_IN_SHEET = "%d.%m.%Y"
@@ -32,13 +34,89 @@ DATE_FORMAT_IN_SHEET = "%d.%m.%Y"
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
 # --- Налаштування Кешу ---
-_CACHED_SCHEDULE_DATA = None # Тут буде зберігатися кеш { 'дата_рядок': ['час1', 'час2'], ... }
+_CACHED_SCHEDULE_DATA = None  # Тут буде зберігатися кеш { 'дата_рядок': ['час1', 'час2'], ... }
 _LAST_SCHEDULE_FETCH_TIME = None
-CACHE_TTL = timedelta(minutes=5) # Час життя кешу, наприклад 5 хвилин
-
+CACHE_TTL = timedelta(minutes=5)  # Час життя кешу, наприклад 5 хвилин
 
 # --- Авторизація ---
 _CLIENT = None  # Кешуємо клієнт для ефективності
+
+
+def get_client_provided_name(user_id: int):
+    """
+    Шукає збережене ім'я клієнта за його Telegram user_id.
+    Повертає ім'я або None, якщо не знайдено.
+    """
+    print(f"DEBUG: Attempting to get client name for user_id: {user_id} from '{CLIENTS_WORKSHEET_NAME}' sheet...",
+          file=sys.stderr)
+    try:
+        client = get_gspread_client()
+        sheet = client.open(SPREADSHEET_NAME).worksheet(CLIENTS_WORKSHEET_NAME)
+
+        # Шукаємо користувача за ID (припускаємо, що ID в першій колонці)
+        try:
+            cell = sheet.find(str(user_id), in_column=1)  # user_id зазвичай int, треба перевести в рядок для пошуку
+            if cell:
+                # Припускаємо, що 'provided_name' знаходиться в 3-й колонці (C)
+                provided_name = sheet.cell(cell.row, 3).value
+                if provided_name:
+                    print(f"DEBUG: Found client name: '{provided_name}' for user_id: {user_id}", file=sys.stderr)
+                    return str(provided_name)
+        except gspread.exceptions.CellNotFound:
+            print(f"DEBUG: Client with user_id: {user_id} not found in '{CLIENTS_WORKSHEET_NAME}'.", file=sys.stderr)
+            return None
+        except Exception as e_find:  # Інші можливі помилки gspread при пошуку
+            print(f"ERROR finding client in '{CLIENTS_WORKSHEET_NAME}': {type(e_find).__name__} - {e_find}",
+                  file=sys.stderr)
+            return None  # На випадок помилки краще повернути None, ніж впасти
+
+        print(f"DEBUG: Client with user_id: {user_id} not found or no name recorded.", file=sys.stderr)
+        return None  # Не знайдено або ім'я порожнє
+
+    except Exception as e:
+        print(f"ERROR in get_client_provided_name: {type(e).__name__} - {e}", file=sys.stderr)
+        return None  # У разі будь-якої помилки повертаємо None
+
+
+def save_or_update_client_name(user_id: int, telegram_username: str, provided_name: str):
+    """
+    Зберігає або оновлює ім'я клієнта в аркуші 'Клиенты'.
+    """
+    print(
+        f"DEBUG: Attempting to save/update client name for user_id: {user_id}, name: {provided_name} in '{CLIENTS_WORKSHEET_NAME}'...",
+        file=sys.stderr)
+    try:
+        client = get_gspread_client()
+        sheet = client.open(SPREADSHEET_NAME).worksheet(CLIENTS_WORKSHEET_NAME)
+        now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+        try:
+            cell = sheet.find(str(user_id), in_column=1)  # Шукаємо за ID
+            # Якщо знайдено, оновлюємо ім'я та last_seen
+            sheet.update_cell(cell.row, 2, telegram_username or "")  # telegram_username (B)
+            sheet.update_cell(cell.row, 3, provided_name)  # provided_name (C)
+            sheet.update_cell(cell.row, 5, now_str)  # last_seen (E)
+            print(f"DEBUG: Updated client name for user_id: {user_id}", file=sys.stderr)
+        except gspread.exceptions.CellNotFound:
+            # Якщо не знайдено, додаємо новий рядок
+            sheet.append_row([
+                str(user_id),  # telegram_user_id (A)
+                telegram_username or "",  # telegram_username (B)
+                provided_name,  # provided_name (C)
+                now_str,  # first_seen (D)
+                now_str  # last_seen (E)
+            ])
+            print(f"DEBUG: Added new client with user_id: {user_id}", file=sys.stderr)
+        except Exception as e_update:
+            print(
+                f"ERROR updating/appending client in '{CLIENTS_WORKSHEET_NAME}': {type(e_update).__name__} - {e_update}",
+                file=sys.stderr)
+            # Можна просто пропустити помилку запису імені, щоб не ламати основний потік
+            pass
+
+    except Exception as e:
+        print(f"ERROR in save_or_update_client_name: {type(e).__name__} - {e}", file=sys.stderr)
+        # Не перекидаємо помилку далі, щоб не переривати основний потік бота через помилку збереження імен
 
 
 # --- Авторизація ---
@@ -58,6 +136,7 @@ def get_gspread_client():
             # print(f"ПОМИЛКА АВТОРИЗАЦІЇ Google Sheets: {type(e).__name__} - {e}", file=sys.stderr)
             raise
     return _CLIENT
+
 
 # --- Функція для інвалідації (скидання) кешу ---
 def invalidate_schedule_cache():
@@ -142,7 +221,7 @@ def get_available_dates():
         raise
     except Exception as e:
         # print(f"ПОМИЛКА в get_available_dates: {type(e).__name__} - {e}", file=sys.stderr)
-        invalidate_schedule_cache() # Скидаємо кеш у разі будь-якої помилки завантаження
+        invalidate_schedule_cache()  # Скидаємо кеш у разі будь-якої помилки завантаження
         raise
 
 
