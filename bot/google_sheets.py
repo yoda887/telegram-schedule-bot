@@ -7,10 +7,13 @@ from datetime import datetime, date, timedelta, timezone  # Додано timezon
 import sys  # Для логування в stderr
 import os  # Потрібен для перевірки шляху
 import copy
+import pytz  # <<< ДОДАЙТЕ ЦЕЙ ІМПОРТ
 
 # --- Налаштування ---
 # !!! ЗАМІНІТЬ 'telegram-schedule-bot' НА ВАШУ РЕАЛЬНУ НАЗВУ ПАПКИ !!!
 # SERVICE_ACCOUNT_FILE = '/root/telegram-schedule-bot/creds.json'
+KYIV_TZ = pytz.timezone('Europe/Kiev')  # <<< ДОДАЙТЕ ЧАСОВИЙ ПОЯС КИЄВА
+
 SERVICE_ACCOUNT_FILE = 'creds.json'
 # Переконайтесь, що назви таблиці та аркушів ТОЧНО відповідають вашим у Google Sheets
 SPREADSHEET_NAME = "ClientRequests"
@@ -54,12 +57,13 @@ def get_client_provided_name(user_id: int):
             # або повертати None/генерувати іншу помилку в нових при не знаходженні.
             # Краще перевіряти результат.
             target_cell = sheet.find(str(user_id), in_column=1)
-        except gspread.exceptions.CellNotFound: # Залишаємо про всяк випадок для старих версій
-             print(f"DEBUG: CellNotFound caught for user_id: {user_id}.", file=sys.stderr)
-             target_cell = None # Явно вказуємо, що не знайдено
+        except gspread.exceptions.CellNotFound:  # Залишаємо про всяк випадок для старих версій
+            print(f"DEBUG: CellNotFound caught for user_id: {user_id}.", file=sys.stderr)
+            target_cell = None  # Явно вказуємо, що не знайдено
         except Exception as e_find:
-             print(f"ERROR during sheet.find() in get_client_provided_name: {type(e_find).__name__} - {e_find}", file=sys.stderr)
-             return None # Помилка пошуку
+            print(f"ERROR during sheet.find() in get_client_provided_name: {type(e_find).__name__} - {e_find}",
+                  file=sys.stderr)
+            return None  # Помилка пошуку
 
         if target_cell:
             # Знайдено, припускаємо, що ім'я в колонці C (індекс 2)
@@ -76,49 +80,54 @@ def get_client_provided_name(user_id: int):
     except Exception as e:
         print(f"ERROR in get_client_provided_name: {type(e).__name__} - {e}", file=sys.stderr)
         return None
+    pass  # Placeholder
+
 
 def save_or_update_client_name(user_id: int, telegram_username: str, provided_name: str):
-    """Зберігає або оновлює ім'я клієнта."""
-    print(f"DEBUG: Saving/Updating client name for user_id: {user_id}, name: {provided_name}...", file=sys.stderr)
+    """Зберігає або оновлює ім'я клієнта, використовуючи час по Києву для позначок."""
+    # print(f"DEBUG: Saving/Updating client name for user_id: {user_id}, name: {provided_name}...", file=sys.stderr)
     try:
         client = get_gspread_client()
         sheet = client.open(SPREADSHEET_NAME).worksheet(CLIENTS_WORKSHEET_NAME)
-        now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+        now_kyiv = datetime.now(KYIV_TZ)  # <<< Час по Києву
+        now_str = now_kyiv.strftime("%d.%m.%Y %H:%M:%S")  # <<< Форматуємо для запису
+
         target_cell = None
         try:
             target_cell = sheet.find(str(user_id), in_column=1)
-        except gspread.exceptions.CellNotFound: # Для старих версій
+        except gspread.exceptions.CellNotFound:
             target_cell = None
         except Exception as e_find:
-             print(f"ERROR during sheet.find() in save_or_update_client_name: {type(e_find).__name__} - {e_find}", file=sys.stderr)
-             # У разі помилки пошуку, не намагаємося додавати/оновлювати
-             return
+            # print(f"ERROR during sheet.find() in save_or_update_client_name: {type(e_find).__name__} - {e_find}", file=sys.stderr)
+            return
 
         if target_cell:
-            # ЗНАЙДЕНО - Оновлюємо
             try:
-                sheet.update_cell(target_cell.row, 2, telegram_username or "") # Username (B)
-                sheet.update_cell(target_cell.row, 3, provided_name)         # Name (C)
-                sheet.update_cell(target_cell.row, 5, now_str)               # last_seen (E)
-                print(f"DEBUG: Updated client name for user_id: {user_id}", file=sys.stderr)
+                sheet.update_cell(target_cell.row, 2, telegram_username or "")
+                sheet.update_cell(target_cell.row, 3, provided_name)
+                sheet.update_cell(target_cell.row, 5, now_str)  # <<< last_seen по Києву
+                # print(f"DEBUG: Updated client name for user_id: {user_id}", file=sys.stderr)
             except Exception as e_update:
-                 print(f"ERROR updating client in '{CLIENTS_WORKSHEET_NAME}': {type(e_update).__name__} - {e_update}", file=sys.stderr)
+                # print(f"ERROR updating client in '{CLIENTS_WORKSHEET_NAME}': {type(e_update).__name__} - {e_update}", file=sys.stderr)
+                pass  # Placeholder
         else:
-            # НЕ ЗНАЙДЕНО - Додаємо новий рядок
             try:
                 sheet.append_row([
-                    str(user_id),         # telegram_user_id (A)
-                    telegram_username or "", # telegram_username (B)
-                    provided_name,      # provided_name (C)
-                    now_str,            # first_seen (D)
-                    now_str             # last_seen (E)
+                    str(user_id),
+                    telegram_username or "",
+                    provided_name,
+                    now_str,  # <<< first_seen по Києву
+                    now_str  # <<< last_seen по Києву
                 ])
-                print(f"DEBUG: Added new client with user_id: {user_id}", file=sys.stderr)
+                # print(f"DEBUG: Added new client with user_id: {user_id}", file=sys.stderr)
             except Exception as e_append:
-                 print(f"ERROR appending client in '{CLIENTS_WORKSHEET_NAME}': {type(e_append).__name__} - {e_append}", file=sys.stderr)
-
+                # print(f"ERROR appending client in '{CLIENTS_WORKSHEET_NAME}': {type(e_append).__name__} - {e_append}", file=sys.stderr)
+                pass  # Placeholder
     except Exception as e:
-        print(f"ERROR in save_or_update_client_name: {type(e).__name__} - {e}", file=sys.stderr)
+        # print(f"ERROR in save_or_update_client_name: {type(e).__name__} - {e}", file=sys.stderr)
+        pass  # Placeholder
+
 
 # --- Авторизація ---
 def get_gspread_client():
@@ -152,77 +161,120 @@ def invalidate_schedule_cache():
 def get_available_dates():
     """
     Отримує доступні дати та час з кешу або з аркуша 'Графік',
-    фільтруючи за статусом 'вільно' та за датою (наступні 7 днів).
+    фільтруючи за статусом 'вільно', за датою (наступні 7 днів)
+    та за часом (не показує минулий час для сьогоднішньої дати, час по Києву).
     """
     global _CACHED_SCHEDULE_DATA, _LAST_SCHEDULE_FETCH_TIME
-    now = datetime.now(timezone.utc)  # Використовуємо timezone-aware datetime
+
+    now_kyiv = datetime.now(KYIV_TZ)  # Поточний час у Києві
+    now_utc = datetime.now(timezone.utc)  # Для порівняння з часом кешування
 
     # Перевіряємо кеш
     if _CACHED_SCHEDULE_DATA is not None and \
             _LAST_SCHEDULE_FETCH_TIME is not None and \
-            (now - _LAST_SCHEDULE_FETCH_TIME) < CACHE_TTL:
+            (
+                    now_utc - _LAST_SCHEDULE_FETCH_TIME) < CACHE_TTL:  # Припускаємо, що _LAST_SCHEDULE_FETCH_TIME збережено як UTC
         # print("DEBUG: Повернення доступних дат з КЕШУ.", file=sys.stderr)
-        # Повертаємо глибоку копію, щоб випадково не змінити кеш
         return copy.deepcopy(_CACHED_SCHEDULE_DATA)
 
     # print(f"DEBUG: Кеш застарів або порожній. Завантаження актуальних дат з Google Sheets...", file=sys.stderr)
-    available_slots = {}  # Змінено з available_dates на available_slots для ясності
+    available_slots = {}
     try:
         client = get_gspread_client()
         sheet = client.open(SPREADSHEET_NAME).worksheet(SCHEDULE_WORKSHEET_NAME)
-        # print(f"Аркуш '{SCHEDULE_WORKSHEET_NAME}' відкрито. Отримання записів...", file=sys.stderr)
         records = sheet.get_all_records()  # Читаємо всі дані
-        # print(f"Отримано {len(records)} записів.", file=sys.stderr)
 
-        today = date.today()
-        end_date = today + timedelta(days=7)
+        today_kyiv = now_kyiv.date()  # Сьогоднішня дата у Києві
+        end_date_kyiv = today_kyiv + timedelta(days=7)
         processed_dates_temp = {}
 
         for record in records:
             date_str = record.get(DATE_COLUMN)
-            time_val = record.get(TIME_COLUMN)
+            time_val_sheet = record.get(TIME_COLUMN)  # Може бути числом (9) або рядком ("09:00")
             status_val = record.get(STATUS_COLUMN)
 
-            if date_str and time_val and status_val and str(status_val).strip().lower() == STATUS_FREE:
+            # Переконуємося, що time_val_sheet - це рядок для консистентного парсингу
+            time_str_from_sheet = str(time_val_sheet).strip()
+
+            if date_str and time_str_from_sheet and status_val and str(status_val).strip().lower() == STATUS_FREE:
                 try:
                     record_date_obj = datetime.strptime(str(date_str), DATE_FORMAT_IN_SHEET).date()
-                    if today <= record_date_obj < end_date:
-                        if date_str not in processed_dates_temp:
-                            processed_dates_temp[date_str] = []
-                        processed_dates_temp[date_str].append(str(time_val))
-                except ValueError:
-                    # print(
-                    #     f"Попередження: Не розпарсено дату '{date_str}' в форматі '{DATE_FORMAT_IN_SHEET}'. Пропущено.",
-                    #     file=sys.stderr)
+
+                    # Фільтруємо за діапазоном дат (дати по Києву)
+                    if today_kyiv <= record_date_obj < end_date_kyiv:
+                        # Парсимо час, припускаючи формат HH:MM або H:MM, або просто година
+                        parsed_time_for_slot = ""
+                        try:
+                            if ':' not in time_str_from_sheet:  # наприклад "9", "10"
+                                if time_str_from_sheet.isdigit() and 0 <= int(time_str_from_sheet) <= 23:
+                                    parsed_time_for_slot = f"{int(time_str_from_sheet):02d}:00"
+                                else:
+                                    # print(f"Попередження: Некоректний формат часу '{time_str_from_sheet}' для дати '{date_str}'. Пропущено.", file=sys.stderr)
+                                    continue
+                            else:  # наприклад "09:00", "9:30"
+                                parts = time_str_from_sheet.split(':')
+                                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                                    hour, minute = int(parts[0]), int(parts[1])
+                                    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                                        # print(f"Попередження: Некоректний діапазон часу '{time_str_from_sheet}' для дати '{date_str}'. Пропущено.", file=sys.stderr)
+                                        continue
+                                    parsed_time_for_slot = f"{hour:02d}:{minute:02d}"
+                                else:
+                                    # print(f"Попередження: Некоректний формат часу '{time_str_from_sheet}' для дати '{date_str}'. Пропущено.", file=sys.stderr)
+                                    continue
+
+                            record_time_obj = datetime.strptime(parsed_time_for_slot, "%H:%M").time()
+                        except ValueError:
+                            # print(f"Попередження: Не розпарсено час '{time_str_from_sheet}' (після обробки: '{parsed_time_for_slot}') для дати '{date_str}'. Пропущено.", file=sys.stderr)
+                            continue
+
+                        # Створюємо datetime для слоту (наївний), потім локалізуємо до Києва
+                        slot_naive_dt = datetime.combine(record_date_obj, record_time_obj)
+                        slot_kyiv_dt = KYIV_TZ.localize(slot_naive_dt)
+                        # Для більшої надійності з pytz, особливо при переході на літній/зимовий час:
+                        # slot_kyiv_dt = KYIV_TZ.normalize(KYIV_TZ.localize(slot_naive_dt))
+
+                        # Фільтруємо минулий час для сьогоднішньої дати або будь-які минулі слоти
+                        if slot_kyiv_dt > now_kyiv:
+                            if date_str not in processed_dates_temp:
+                                processed_dates_temp[date_str] = []
+                            processed_dates_temp[date_str].append(parsed_time_for_slot)  # Зберігаємо оброблений час
+
+                except ValueError:  # Для парсингу дати
+                    # print(f"Попередження: Не розпарсено дату '{date_str}' в форматі '{DATE_FORMAT_IN_SHEET}'. Пропущено.", file=sys.stderr)
                     continue
 
-        sorted_date_keys = sorted(processed_dates_temp.keys(),
-                                  key=lambda d: datetime.strptime(d, DATE_FORMAT_IN_SHEET).date())
+        # Сортуємо дати та час
+        sorted_date_keys = sorted(
+            processed_dates_temp.keys(),
+            key=lambda d: datetime.strptime(d, DATE_FORMAT_IN_SHEET).date()
+        )
         for date_key in sorted_date_keys:
-            available_slots[date_key] = sorted(processed_dates_temp[date_key])
+            # Видаляємо дати, які стали порожніми після фільтрації часу
+            if processed_dates_temp[date_key]:
+                available_slots[date_key] = sorted(processed_dates_temp[date_key])
 
         # Зберігаємо в кеш
         _CACHED_SCHEDULE_DATA = available_slots
-        _LAST_SCHEDULE_FETCH_TIME = now
+        _LAST_SCHEDULE_FETCH_TIME = now_utc  # Зберігаємо час останнього завантаження як UTC
         # print(f"DEBUG: Кеш оновлено новими даними. TTL: {CACHE_TTL}. Слоти: {available_slots}", file=sys.stderr)
-        return copy.deepcopy(available_slots)  # Повертаємо копію
+        return copy.deepcopy(available_slots)
 
-        # print(f"Знайдено доступні слоти: {available_dates}")
-        # return available_dates
-        # return available_slots
     except gspread.exceptions.SpreadsheetNotFound:
-        # print(f"ПОМИЛКА: Таблицю '{SPREADSHEET_NAME}' не знайдено. Перевірте назву та доступ.")
+        # print(f"ПОМИЛКА: Таблицю '{SPREADSHEET_NAME}' не знайдено.")
+        invalidate_schedule_cache()
         raise
     except gspread.exceptions.WorksheetNotFound:
-        # print(f"ПОМИЛКА: Аркуш '{SCHEDULE_WORKSHEET_NAME}' не знайдено. Перевірте назву.")
+        # print(f"ПОМИЛКА: Аркуш '{SCHEDULE_WORKSHEET_NAME}' не знайдено.")
+        invalidate_schedule_cache()
         raise
     except KeyError as e:
-        # print(
-        #     f"ПОМИЛКА: Відсутній необхідний стовпець в аркуші '{SCHEDULE_WORKSHEET_NAME}' (очікувались '{DATE_COLUMN}', '{TIME_COLUMN}', '{STATUS_COLUMN}'). Помилка: {e}")
+        # print(f"ПОМИЛКА: Відсутній стовпець в '{SCHEDULE_WORKSHEET_NAME}'. Помилка: {e}")
+        invalidate_schedule_cache()
         raise
     except Exception as e:
         # print(f"ПОМИЛКА в get_available_dates: {type(e).__name__} - {e}", file=sys.stderr)
-        invalidate_schedule_cache()  # Скидаємо кеш у разі будь-якої помилки завантаження
+        invalidate_schedule_cache()
         raise
 
 
