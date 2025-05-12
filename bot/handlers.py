@@ -8,7 +8,7 @@ from datetime import datetime
 import pytz # <<< ДОДАЙТЕ ЦЕЙ ІМПОРТ
 
 from aiogram import Router, types, F
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart, StateFilter, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
 
@@ -20,7 +20,9 @@ from .keyboards import (
     get_dates_keyboard,
     get_times_keyboard,
     get_share_contact_keyboard,
-    get_back_to_main_menu_keyboard
+    get_back_to_main_menu_keyboard,
+    get_messenger_choice_keyboard, # <<< НАШ НОВИЙ ІМПОРТ
+    MESSENGER_OPTIONS # <<< ІМПОРТУЄМО ОПЦІЇ МЕСЕНДЖЕРІВ
 )
 # Импортируем функции для работы с Google Sheets
 from .google_sheets import (
@@ -37,7 +39,7 @@ from .google_sheets import (
 
 )
 # Импортируем утилиты для уведомлений
-from .utils import notify_admin_new_contact, notify_admin_new_booking
+from .utils import notify_admin_new_contact, notify_admin_new_booking, notify_admin_new_booking_extended
 
 # Якщо KYIV_TZ не імпортується, визначте його тут:
 if 'KYIV_TZ' not in globals():
@@ -90,7 +92,89 @@ async def cmd_start_handler(message: Message, state: FSMContext, remembered_name
     await show_service_choice_menu(message, state, display_name)
 
 
-# /root/telegram-schedule-bot/bot/handlers.py
+@main_router.message(Command("rename"))
+async def cmd_rename_handler(message: Message, state: FSMContext):
+    """Обробляє команду /rename для зміни збереженого імені користувача."""
+    await state.clear()  # Спочатку очистимо будь-який попередній стан
+    user_id = message.from_user.id
+
+    # Спробуємо отримати поточне ім'я спочатку з FSM, потім з Google Sheets
+    user_fsm_data = await state.get_data()
+    current_name = user_fsm_data.get("name")
+
+    if not current_name:
+        try:
+            current_name_from_sheet = get_client_provided_name(user_id)
+            if current_name_from_sheet:
+                current_name = current_name_from_sheet
+        except Exception as e:
+            print(f"DEBUG [handlers.py]: Помилка отримання імені для /rename user {user_id}: {e}", file=sys.stderr)
+
+    if current_name:
+        await state.update_data(
+            current_name_for_rename=current_name)  # Збережемо поточне ім'я на випадок, якщо знадобиться
+        await message.answer(
+            f"Ваше поточне збережене ім'я: <b>{current_name}</b>.\n"
+            "Будь ласка, введіть нове ім'я:",
+            parse_mode="HTML"
+        )
+        await state.set_state(Form.renaming_name)
+    else:
+        await message.answer(
+            "Здається, для вас ще не збережено ім'я. Ви можете встановити його, "
+            "скориставшись функцією запису на консультацію або залишення контакту."
+        )
+        await message.answer(
+            "Бажаєте повернутися до головного меню?",
+            reply_markup=get_back_to_main_menu_keyboard()
+        )
+
+
+@main_router.message(StateFilter(Form.renaming_name), F.text)
+async def process_new_name_handler(message: Message, state: FSMContext):
+    """Обробляє нове ім'я, введене користувачем."""
+    new_name = message.text.strip()
+    user_id = message.from_user.id
+    tg_username = f"@{message.from_user.username}" if message.from_user.username else ""
+
+    if not new_name:  # Проста валідація
+        await message.answer("Ім'я не може бути порожнім. Будь ласка, введіть коректне ім'я:")
+        return  # Залишаємося в стані Form.renaming_name
+
+    try:
+        save_or_update_client_name(user_id, tg_username, new_name)  # Зберігаємо/оновлюємо в Google Sheets
+        await state.update_data(name=new_name)  # Оновлюємо ім'я в поточному стані FSM
+
+        await message.answer(
+            f"Ваше ім'я успішно змінено на: <b>{new_name}</b>.",
+            parse_mode="HTML"
+        )
+        print(f"DEBUG [handlers.py]: Ім'я для user {user_id} оновлено на '{new_name}' через /rename.", file=sys.stderr)
+
+        # Пропонуємо повернутися до головного меню
+        await message.answer(
+            "Бажаєте повернутися до головного меню?",
+            reply_markup=get_back_to_main_menu_keyboard()
+        )
+        await state.clear()  # Очищуємо стан після успішної зміни
+
+    except Exception as e:
+        print(
+            f"ОШИБКА [handlers.py]: під час оновлення імені для user {user_id} через /rename: {type(e).__name__} - {e}",
+            file=sys.stderr)
+        await message.answer("На жаль, сталася помилка під час оновлення вашого імені. Спробуйте пізніше.")
+        await message.answer(
+            "Бажаєте повернутися до головного меню?",
+            reply_markup=get_back_to_main_menu_keyboard()
+        )
+        await state.clear()
+
+
+@main_router.message(StateFilter(Form.renaming_name)) # Обробник для нетекстового вводу
+async def process_new_name_invalid_input_handler(message: Message, state: FSMContext):
+    """Обробляє нетекстовий ввід, коли очікується нове ім'я."""
+    await message.answer("Будь ласка, введіть ваше нове ім'я текстом. Якщо бажаєте скасувати зміну імені, можете скористатися командою /start.")
+
 
 @main_router.callback_query(StateFilter(Form.service_choice))
 async def service_choice_callback_handler(callback: CallbackQuery, state: FSMContext):
@@ -405,64 +489,173 @@ async def get_time_callback_handler(callback: CallbackQuery, state: FSMContext):
 
 @main_router.message(StateFilter(Form.question))
 async def get_question_handler(message: Message, state: FSMContext):
-    """Получает вопрос, сохраняет заявку и возвращает на старт."""
-    question = message.text
+    """Отримує питання, зберігає його в FSM та запитує номер телефону для консультації."""
+    question_text = message.text
+    await state.update_data(question=question_text)
     user_data = await state.get_data()
     user_name = user_data.get("name", f"User {message.from_user.id}")
+
+    print(f"DEBUG [handlers.py]: Питання від {user_name} отримано: '{question_text}'. Запит номера телефону...",
+          file=sys.stderr)
+
+    await state.set_state(Form.booking_phone_number)
+    # Використовуємо клавіатуру для поширення контакту
+    keyboard = get_share_contact_keyboard()
+    await message.answer(
+        f"Дякую, ваше питання було: \"{question_text}\".\n\n"
+        f"Тепер, будь ласка, поділіться вашим <b>номером телефону</b>. Він потрібен для зв'язку щодо консультації та узгодження деталей.\n"
+        "Натисніть кнопку нижче або введіть номер вручну:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+
+@main_router.message(StateFilter(Form.booking_phone_number), F.contact)
+async def booking_phone_shared_handler(message: Message, state: FSMContext):
+    """Обробляє номер телефону (поширений) для консультації та запитує месенджер."""
+    phone_number = message.contact.phone_number
+    await state.update_data(booking_phone_number=phone_number)
+    user_data = await state.get_data()  # Оновлюємо дані
+    user_name = user_data.get("name", f"User {message.from_user.id}")
+
+    print(
+        f"DEBUG [handlers.py]: Номер тел. '{phone_number}' (поширений) для конс. від {user_name} отримано. Запит месенджера...",
+        file=sys.stderr)
+
+    await state.set_state(Form.messenger_choice)
+    keyboard = get_messenger_choice_keyboard()
+    await message.answer(  # Відповідь без ReplyKeyboardRemove, оскільки клавіатура була one_time_keyboard
+        f"Дякую! Ваш номер телефону: <code>{phone_number}</code>.\n"
+        "Будь ласка, виберіть бажаний месенджер для відеодзвінка:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+
+# Новий обробник для отримання номера телефону (введеного вручну)
+@main_router.message(StateFilter(Form.booking_phone_number), F.text)
+async def booking_phone_text_handler(message: Message, state: FSMContext):
+    """Обробляє номер телефону (введений вручну) для консультації та запитує месенджер."""
+    phone_number = message.text
+    # Тут можна додати базову валідацію номера телефону, якщо потрібно
+    await state.update_data(booking_phone_number=phone_number)
+    user_data = await state.get_data()  # Оновлюємо дані
+    user_name = user_data.get("name", f"User {message.from_user.id}")
+
+    print(
+        f"DEBUG [handlers.py]: Номер тел. '{phone_number}' (введений) для конс. від {user_name} отримано. Запит месенджера...",
+        file=sys.stderr)
+
+    await state.set_state(Form.messenger_choice)
+    keyboard = get_messenger_choice_keyboard()
+    await message.answer(  # Відповідь без ReplyKeyboardRemove
+        f"Дякую! Ваш номер телефону: <code>{phone_number}</code>.\n"
+        "Будь ласка, виберіть бажаний месенджер для відеодзвінка:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+
+# Новий обробник для вибору месенджера та завершення бронювання
+@main_router.callback_query(StateFilter(Form.messenger_choice), F.data.startswith("messenger_"))
+async def messenger_choice_handler(callback: CallbackQuery, state: FSMContext):
+    """Обробляє вибір месенджера та завершує бронювання."""
+    await callback.answer()
+    chosen_messenger_key = callback.data.split("messenger_")[1]
+    chosen_messenger_text = MESSENGER_OPTIONS.get(chosen_messenger_key,
+                                                  chosen_messenger_key.capitalize())  # Отримуємо читабельну назву
+
+    await state.update_data(preferred_messenger=chosen_messenger_text)
+
+    user_data = await state.get_data()
+    user_name = user_data.get("name", f"User {callback.from_user.id}")
     selected_date = user_data.get("date")
     selected_time = user_data.get("time")
-    user_id = message.from_user.id
-    telegram_username = f"@{message.from_user.username}" if message.from_user.username else f"ID:{user_id}"
-    contact_info_for_booking = telegram_username
+    question = user_data.get("question")
+    booking_phone_number = user_data.get("booking_phone_number")  # Отримуємо номер телефону
 
-    if not selected_date or not selected_time:
-        await message.answer("Виникла помилка стану (не знайдено дату або час). Будь ласка, почніть з /start.")
+    user_id = callback.from_user.id
+    telegram_username = f"@{callback.from_user.username}" if callback.from_user.username else f"ID:{user_id}"
+
+    if not all([selected_date, selected_time, question, booking_phone_number, chosen_messenger_text]):
+        await callback.message.edit_text("Виникла помилка стану (не всі дані зібрано). Будь ласка, почніть з /start.")
         await state.clear()
         return
+
     try:
         g_client = get_gspread_client()
         sheet = g_client.open(SPREADSHEET_NAME).worksheet(REQUESTS_WORKSHEET_NAME)
-        timestamp = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M:%S") # Використовуємо KYIV_TZ, якщо налаштовано
-        print(f"DEBUG [handlers.py]: Збереження запису для {user_name}...", file=sys.stderr)
+
+        timestamp = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M:%S")
+
+        print(f"DEBUG [handlers.py]: Збереження запису для {user_name} з телефоном і месенджером...", file=sys.stderr)
+        # Порядок колонок у Google Sheets:
+        # Ім'я, Телеграм-контакт, Питання, User ID, Дата, Час, Час запису, Телефон (Консультація), Месенджер
         sheet.append_row([
-            user_name, contact_info_for_booking, question, str(user_id),
-            selected_date, selected_time, timestamp
+            user_name,
+            telegram_username,  # Контакт в Telegram
+            question,
+            str(user_id),
+            selected_date,
+            selected_time,
+            timestamp,
+            booking_phone_number,  # <<< НОВЕ ПОЛЕ
+            chosen_messenger_text  # <<< НОВЕ ПОЛЕ
         ])
-        print("DEBUG [handlers.py]: Запис збережено.", file=sys.stderr)
+        print("DEBUG [handlers.py]: Запис збережено (з телефоном і месенджером).", file=sys.stderr)
 
-        await notify_admin_new_booking(bot, ADMIN_CHAT_ID, user_name, selected_date, selected_time, question,
-                                       telegram_username, user_id, timestamp)
+        # Оновлюємо або використовуємо розширену функцію для повідомлення адміну
+        await notify_admin_new_booking_extended(
+            bot_instance=bot,  # Передаємо екземпляр бота
+            admin_chat_id=ADMIN_CHAT_ID,
+            user_name=user_name,
+            selected_date=selected_date,
+            selected_time=selected_time,
+            question=question,
+            telegram_username=telegram_username,
+            user_id=user_id,
+            timestamp=timestamp,
+            booking_phone=booking_phone_number,  # <<< НОВИЙ ПАРАМЕТР
+            preferred_messenger=chosen_messenger_text  # <<< НОВИЙ ПАРАМЕТР
+        )
 
-        await message.answer(
-            f"Дякую, {user_name}! Ваш запис на консультацію ({selected_date} {selected_time}) підтверджено!"
+        await callback.message.edit_text(
+            f"Дякую, {user_name}! Ваш запис на консультацію ({selected_date} {selected_time}) підтверджено!\n\n"
+            f"<b>Ваш телефон:</b> <code>{booking_phone_number}</code>\n"
+            f"<b>Бажаний месенджер:</b> {chosen_messenger_text}",
+            parse_mode="HTML"
         )
 
         lawyer_contact = os.getenv("LAWYER_CONTACT_DETAILS", "контактні дані адвоката (тел/email)")
         payment_info = os.getenv("PAYMENT_DETAILS_TEXT", "реквізити для оплати будуть надіслані вам додатково")
 
+        # Оновлюємо details_html, щоб відобразити отриманий телефон та месенджер
         details_html = (
             f"🗓️ <b>Деталі вашого запису:</b> {selected_date} о {selected_time}.\n\n"
             f"<b>Порядок проведення онлайн-консультації:</b>\n\n"
-            f"1️⃣ <b>Платформа:</b> Ми зв'яжемося з вами ({contact_info_for_booking}) для узгодження (Zoom, Meet тощо).\n\n"
-            f"2️⃣ <b>Підготовка:</b> Документи (копії/фото), стабільний інтернет, тиша.\n\n"
+            f"1️⃣ <b>Платформа:</b> Ми зв'яжемося з вами за номером <code>{booking_phone_number}</code> (бажаний месенджер: {chosen_messenger_text}) незадовго до початку, щоб узгодити зручну платформу (Zoom, Google Meet, Teams, Viber, WhatsApp, Telegram тощо) та надати посилання.\n\n"
+            f"2️⃣ <b>Підготовка:</b> Якщо ваше питання стосується документів, підготуйте їх копії/фото. Будь ласка, забезпечте стабільний інтернет та тихе місце.\n\n"
             f"3️⃣ <b>Оплата:</b> Вартість - <b>1000 грн/год</b>. {payment_info}\n\n"
-            f"4️⃣ <b>Консультація:</b> Обговорення питання, рекомендації.\n\n"
-            f"5️⃣ <b>Зв'язок до:</b> {lawyer_contact}.\n\n"
-            f"Очікуйте на зв'язок!"
+            f"4️⃣ <b>Консультація:</b> Будьте готові обговорити ваше питання. Адвокат Меркович Богдан надасть вам необхідні роз'яснення та рекомендації.\n\n"
+            f"5️⃣ <b>Зв'язок:</b> З термінових питань щодо запису <i>до</i> консультації звертайтесь: {lawyer_contact}.\n\n"
+            f"Очікуйте на зв'язок для узгодження платформи!"
         )
-        await message.answer(details_html, parse_mode="HTML")
+        await callback.message.answer(details_html, parse_mode="HTML")
 
-        # ЗАМІСТЬ: await cmd_start_handler(message, state, remembered_name=user_name)
-        # НАДІСЛАТИ КНОПКУ:
-        await message.answer(
+        await callback.message.answer(
             "Консультацію заплановано. Бажаєте повернутися до головного меню?",
             reply_markup=get_back_to_main_menu_keyboard()
         )
-        await state.clear()  # Очищуємо стан після завершення
+        await state.clear()
 
     except Exception as e:
-        print(f"ОШИБКА [handlers.py]: збереження запису консультації: {type(e).__name__} - {e}", file=sys.stderr)
-        await message.answer("На жаль, сталася помилка під час фінального збереження вашого запису...")
+        print(f"ОШИБКА [handlers.py]: збереження запису консультації (з месенджером): {type(e).__name__} - {e}",
+              file=sys.stderr)
+        await callback.message.answer("На жаль, сталася помилка під час фінального збереження вашого запису...")
+        await callback.message.answer(
+            "Бажаєте повернутися до головного меню?",
+            reply_markup=get_back_to_main_menu_keyboard()
+        )
         await state.clear()
 
 

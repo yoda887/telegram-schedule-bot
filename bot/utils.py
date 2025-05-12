@@ -11,6 +11,7 @@ from aiogram import Bot
 from typing import Optional
 import sys
 
+
 async def send_admin_notification(bot_instance: 'Bot', admin_chat_id: Optional[int], html_text: str) -> None:
     """Отправляет HTML-форматированное уведомление админу."""
     if admin_chat_id is None:
@@ -26,21 +27,23 @@ async def send_admin_notification(bot_instance: 'Bot', admin_chat_id: Optional[i
             file=sys.stderr
         )
 
+
 def _escape_html(text: Optional[str]) -> str:
     """Простое экранирование HTML для безопасной вставки в сообщения."""
     if text is None:
         return ""
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+
 async def notify_admin_new_contact(
-    bot_instance: 'Bot',
-    admin_chat_id: Optional[int],
-    user_name: str,
-    contact_info: str,
-    telegram_username: str,
-    user_id: int,
-    timestamp: str,
-    contact_type: str
+        bot_instance: 'Bot',
+        admin_chat_id: Optional[int],
+        user_name: str,
+        contact_info: str,
+        telegram_username: str,
+        user_id: int,
+        timestamp: str,
+        contact_type: str
 ) -> None:
     """Формирует и отправляет уведомление о новом контакте."""
     text = (
@@ -52,16 +55,17 @@ async def notify_admin_new_contact(
     )
     await send_admin_notification(bot_instance, admin_chat_id, text)
 
+
 async def notify_admin_new_booking(
-    bot_instance: 'Bot',
-    admin_chat_id: Optional[int],
-    user_name: str,
-    selected_date: str,
-    selected_time: str,
-    question: str,
-    telegram_username: str,
-    user_id: int,
-    timestamp: str
+        bot_instance: 'Bot',
+        admin_chat_id: Optional[int],
+        user_name: str,
+        selected_date: str,
+        selected_time: str,
+        question: str,
+        telegram_username: str,
+        user_id: int,
+        timestamp: str
 ) -> None:
     """Формирует и отправляет уведомление о новом бронировании."""
     text = (
@@ -75,5 +79,36 @@ async def notify_admin_new_booking(
     )
     await send_admin_notification(bot_instance, admin_chat_id, text)
 
+
 # Другие общие вспомогательные функции, не связанные напрямую с Google Sheets или хендлерами,
 # можно добавить сюда.
+async def notify_admin_new_booking_extended(
+        bot_instance: 'Bot',  # Можна прибрати ': 'Bot'', якщо у вас стара версія Python або немає type hints
+        admin_chat_id: Optional[int],
+        user_name: str,
+        selected_date: str,
+        selected_time: str,
+        question: str,
+        telegram_username: str,
+        user_id: int,
+        timestamp: str,
+        booking_phone: str,  # Новий параметр
+        preferred_messenger: str  # Новий параметр
+) -> None:
+    """Формує та відправляє розширене HTML-форматоване повідомлення адміну про нове бронювання."""
+    if admin_chat_id is None:
+        print("DEBUG [utils.py]: Сповіщення адміну вимкнені (ADMIN_CHAT_ID не встановлено).", file=sys.stderr)
+        return
+
+    text = (
+        f"📅 <b>Новий запис на консультацію!</b>\n\n"
+        f"👤 <b>Ім'я:</b> {_escape_html(user_name)}\n"
+        f"📱 <b>Телефон для консультації:</b> <code>{_escape_html(booking_phone)}</code>\n"
+        f"🗣️ <b>Бажаний месенджер:</b> {_escape_html(preferred_messenger)}\n"
+        f"🗓️ <b>Дата:</b> {_escape_html(selected_date)}\n"
+        f"🕒 <b>Час:</b> {_escape_html(selected_time)}\n"
+        f"❓ <b>Питання:</b> {_escape_html(question)}\n"
+        f"💬 <b>Telegram:</b> {_escape_html(telegram_username)} (ID: <code>{user_id}</code>)\n"
+        f"⏰ <b>Час запису:</b> {_escape_html(timestamp)}"
+    )
+    await send_admin_notification(bot_instance, admin_chat_id, text)

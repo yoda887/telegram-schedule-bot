@@ -15,3 +15,6 @@ class Form(StatesGroup):
     date = State()  # Ожидание выбора даты консультации
     time = State()  # Ожидание выбора времени консультации
     question = State()  # Ожидание вопроса для консультации
+    booking_phone_number = State()  # <<< НОВИЙ СТАН: для номера телефону при записі на консультацію
+    messenger_choice = State()  # <<< НОВИЙ СТАН: для вибору месенджера
+    renaming_name = State()  # <<< НОВИЙ СТАН для зміни імені

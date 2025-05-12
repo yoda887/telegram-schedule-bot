@@ -6,6 +6,24 @@ from datetime import datetime
 # Импортируем формат даты из google_sheets.py, где он определен
 from .google_sheets import DATE_FORMAT_IN_SHEET
 
+MESSENGER_OPTIONS = {
+    "viber": "Viber",
+    "telegram": "Telegram",
+    "whatsapp": "WhatsApp",
+    "zoom": "Zoom",
+    "teams": "Teams"
+}
+
+def get_messenger_choice_keyboard() -> InlineKeyboardMarkup:
+    """Створює inline-клавіатуру для вибору месенджера."""
+    builder = InlineKeyboardBuilder()
+    for callback_data_key, text in MESSENGER_OPTIONS.items():
+        builder.button(text=text, callback_data=f"messenger_{callback_data_key}")
+    builder.adjust(2) # Розміщуємо по 2 кнопки в ряд
+    # Тут можна додати кнопку "Назад", якщо потрібно повернутися до введення номера телефону
+    builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_booking_phone"))
+    return builder.as_markup()
+
 def get_service_choice_keyboard() -> InlineKeyboardMarkup:
     """Создает inline-клавиатуру для начального выбора услуги."""
     builder = InlineKeyboardBuilder()
