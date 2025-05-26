@@ -18,3 +18,7 @@ class Form(StatesGroup):
     booking_phone_number = State()  # <<< НОВИЙ СТАН: для номера телефону при записі на консультацію
     messenger_choice = State()  # <<< НОВИЙ СТАН: для вибору месенджера
     renaming_name = State()  # <<< НОВИЙ СТАН для зміни імені
+
+    # Состояния для отмены записи
+    list_bookings_for_cancellation = State() # Пользователю показывают его записи для выбора отмены
+    confirm_cancellation = State()           # Пользователь подтверждает отмену выбранной записи
