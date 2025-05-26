@@ -521,10 +521,22 @@ async def messenger_choice_handler(callback: CallbackQuery, state: FSMContext):
         print(f"DEBUG [handlers.py]: Збереження запису для {user_name} з телефоном і месенджером...", file=sys.stderr)
         # Порядок колонок: Ім'я, Телеграм-контакт (UserName/ID), Питання, User ID (числовий), Дата, Час, Час запису (timestamp), Телефон (для консультації), Месенджер, Статус Заявки
         # Додаємо REQUEST_STATUS_COLUMN зі значенням "Активна"
+        # sheet.append_row([
+        #     user_name, telegram_username, question, str(user_id),
+        #     selected_date, selected_time, timestamp,
+        #     booking_phone_number, chosen_messenger_text, "Активна" # Новий статус
+        # ])
         sheet.append_row([
-            user_name, telegram_username, question, str(user_id),
-            selected_date, selected_time, timestamp,
-            booking_phone_number, chosen_messenger_text, "Активна" # Новий статус
+            user_name,            # Ім’я
+            telegram_username,    # Контакт (if this is what you mean by 'Контакт' or if 'Контакт' is separate)
+            question,             # Питання
+            str(user_id),         # Telegram ID
+            selected_date,        # Дата
+            selected_time,        # Час
+            timestamp,            # Час запису
+            booking_phone_number, # Телефон (Консультація)
+            chosen_messenger_text,# Месенджер
+            "Активна"             # Статус Заявки
         ])
         print("DEBUG [handlers.py]: Запис збережено (з телефоном і месенджером, статус 'Активна').", file=sys.stderr)
         await notify_admin_new_booking_extended( bot, ADMIN_CHAT_ID, user_name, selected_date, selected_time, question, telegram_username, user_id, timestamp, booking_phone_number, chosen_messenger_text ) #
