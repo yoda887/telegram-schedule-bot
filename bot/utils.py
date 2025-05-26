@@ -9,7 +9,7 @@ from aiogram import Bot
 # bot_instance также будет передаваться в функции оттуда.
 
 from typing import Optional
-import sys
+# import sys # Уже импортирован выше
 
 
 async def send_admin_notification(bot_instance: 'Bot', admin_chat_id: Optional[int], html_text: str) -> None:
@@ -56,7 +56,7 @@ async def notify_admin_new_contact(
     await send_admin_notification(bot_instance, admin_chat_id, text)
 
 
-async def notify_admin_new_booking(
+async def notify_admin_new_booking( # Ця функція може бути застарілою, якщо notify_admin_new_booking_extended використовується всюди
         bot_instance: 'Bot',
         admin_chat_id: Optional[int],
         user_name: str,
@@ -80,10 +80,8 @@ async def notify_admin_new_booking(
     await send_admin_notification(bot_instance, admin_chat_id, text)
 
 
-# Другие общие вспомогательные функции, не связанные напрямую с Google Sheets или хендлерами,
-# можно добавить сюда.
 async def notify_admin_new_booking_extended(
-        bot_instance: 'Bot',  # Можна прибрати ': 'Bot'', якщо у вас стара версія Python або немає type hints
+        bot_instance: 'Bot',
         admin_chat_id: Optional[int],
         user_name: str,
         selected_date: str,
@@ -92,16 +90,16 @@ async def notify_admin_new_booking_extended(
         telegram_username: str,
         user_id: int,
         timestamp: str,
-        booking_phone: str,  # Новий параметр
-        preferred_messenger: str  # Новий параметр
+        booking_phone: str,
+        preferred_messenger: str
 ) -> None:
     """Формує та відправляє розширене HTML-форматоване повідомлення адміну про нове бронювання."""
     if admin_chat_id is None:
-        print("DEBUG [utils.py]: Сповіщення адміну вимкнені (ADMIN_CHAT_ID не встановлено).", file=sys.stderr)
+        # print("DEBUG [utils.py]: Сповіщення адміну вимкнені (ADMIN_CHAT_ID не встановлено).", file=sys.stderr) # Вже є в send_admin_notification
         return
 
     text = (
-        f"📅 <b>Новий запис на консультацію!</b>\n\n"
+        f"📅✅ <b>Новий запис на консультацію!</b>\n\n"
         f"👤 <b>Ім'я:</b> {_escape_html(user_name)}\n"
         f"📱 <b>Телефон для консультації:</b> <code>{_escape_html(booking_phone)}</code>\n"
         f"🗣️ <b>Бажаний месенджер:</b> {_escape_html(preferred_messenger)}\n"
@@ -110,5 +108,30 @@ async def notify_admin_new_booking_extended(
         f"❓ <b>Питання:</b> {_escape_html(question)}\n"
         f"💬 <b>Telegram:</b> {_escape_html(telegram_username)} (ID: <code>{user_id}</code>)\n"
         f"⏰ <b>Час запису:</b> {_escape_html(timestamp)}"
+    )
+    await send_admin_notification(bot_instance, admin_chat_id, text)
+
+
+async def notify_admin_cancellation(
+        bot_instance: 'Bot',
+        admin_chat_id: Optional[int],
+        user_name: str,
+        cancelled_date: str,
+        cancelled_time: str,
+        telegram_username: str,
+        user_id: int,
+        timestamp: str # Час, коли відбулося скасування
+) -> None:
+    """Формує та відправляє повідомлення адміну про скасування бронювання користувачем."""
+    if admin_chat_id is None:
+        return
+
+    text = (
+        f"❌🗓️ <b>Скасування запису користувачем!</b>\n\n"
+        f"👤 <b>Ім'я:</b> {_escape_html(user_name)}\n"
+        f"🗓️ <b>Скасована дата:</b> {_escape_html(cancelled_date)}\n"
+        f"🕒 <b>Скасований час:</b> {_escape_html(cancelled_time)}\n"
+        f"💬 <b>Telegram:</b> {_escape_html(telegram_username)} (ID: <code>{user_id}</code>)\n"
+        f"⏰ <b>Час скасування:</b> {_escape_html(timestamp)}"
     )
     await send_admin_notification(bot_instance, admin_chat_id, text)
